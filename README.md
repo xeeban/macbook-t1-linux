@@ -6,6 +6,8 @@ How a one-line no-op in an out-of-tree driver kept the Touch Bar **dark on every
 
 There are [slides](./presentation.md) too (Marp).
 
+**Want your own agent to just do it?** Hand [`AGENT_SPEC.md`](./AGENT_SPEC.md) to a coding agent (Claude Code, etc.) and say *"follow AGENT_SPEC.md to make my Touch Bar work."* It's a self-contained spec + phased plan with GO/NO-GO gates, the exact patch, guardrails, and rollback.
+
 ---
 
 ## The machine
