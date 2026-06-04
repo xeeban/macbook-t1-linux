@@ -167,7 +167,14 @@ sudo dmesg | grep -iE 'oops|BUG|call trace|warning'  # expect none
 ### Phase H — Hygiene / cleanup
 - If you created any temporary passwordless-sudo grant to run unattended steps, **remove it now** and verify sudo requires a password again. Validate any `/etc/sudoers*` edit with `visudo -c` **before** it takes effect, and never leave a `NOPASSWD: ALL` line behind.
 - Remove scratch files and disabled-config backups you created.
-- Note for the human: **DKMS rebuilds the patch on kernel updates (good), but an AUR update of `apple-ib-drv-dkms-git` will overwrite the patched source.** Re-apply from the `*.orig` backups, or pin/ignore the package in the AUR helper.
+- **Pin the package** so a future AUR update can't silently wipe the patched source (DKMS rebuilds the patch on *kernel* updates, but a *package* update replaces the source). Add it to `IgnorePkg` (honored by both `pacman -Syu` and `yay`):
+  ```sh
+  # if IgnorePkg is the commented default:
+  sudo sed -i 's/^#IgnorePkg\s*=.*/IgnorePkg    = apple-ib-drv-dkms-git/' /etc/pacman.conf
+  # if an active IgnorePkg line already exists, append " apple-ib-drv-dkms-git" to it instead
+  grep -nE '^\s*IgnorePkg' /etc/pacman.conf   # confirm
+  ```
+  Tell the human: updates will still be *reported* but not installed. To update intentionally, remove the entry, update, then **re-apply the patch from the `*.orig` backups before rebuilding**.
 
 ---
 

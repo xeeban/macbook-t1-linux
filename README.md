@@ -133,6 +133,12 @@ echo 'options apple_touchbar fnmode=2 idle_timeout=-1 dim_timeout=-1' \
   | sudo tee /etc/modprobe.d/apple-ib-tb.conf
 
 # 5. Reboot → esc + F-keys + brightness/volume
+sudo reboot
+
+# 6. PIN the package so a future AUR update can't silently wipe your patched
+#    source. IgnorePkg is honored by both pacman -Syu and yay.
+sudo sed -i 's/^#IgnorePkg\s*=.*/IgnorePkg    = apple-ib-drv-dkms-git/' /etc/pacman.conf
+#    (if you already have an active IgnorePkg line, just append the name to it)
 ```
 
 Verify:
@@ -143,7 +149,7 @@ ls /sys/bus/hid/devices/ | grep 1D6B      # expect 0301 (TB) + 0302 (ALS)
 sudo dmesg | grep -iE 'oops|BUG|warning'  # expect none
 ```
 
-> ⚠️ **DKMS rebuilds the patch on kernel updates, so the fix persists — but an AUR package update of `apple-ib-drv-dkms-git` would overwrite the source.** Re-apply from the `*.orig` backups, or pin/ignore the package in your AUR helper.
+> ⚠️ **DKMS rebuilds the patch on kernel updates, so the fix persists — but an AUR package update of `apple-ib-drv-dkms-git` would overwrite the patched source.** That's why step 6 pins it via `IgnorePkg`. `pacman`/`yay` will still *notify* you that an update exists (good — you stay informed), they just won't install it. When you genuinely want to update: temporarily remove the `IgnorePkg` entry (or `yay -S apple-ib-drv-dkms-git`), then **re-apply the patch from the `*.orig` backups before rebuilding**.
 
 ## Lessons
 
