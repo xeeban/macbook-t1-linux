@@ -1,242 +1,200 @@
 # Fixing suspend/resume on a T1 MacBook Pro (Linux)
 
-Why a **long** sleep — but never a short one — brought the machine back to a lock screen that silently refused every keystroke.
+Why this 2016 MacBook Pro never came back from sleep under Linux — and why the obvious suspect (the Touch Bar driver) was a **red herring** that cost real time.
 
-> **TL;DR** — On a **MacBookPro13,2 (T1)** running Arch Linux (kernel `7.0.10`, `s2idle`), short naps resumed perfectly but longer sleeps came back to a rendered lock screen that ignored all keyboard and trackpad input — only a hard power-down recovered it. The cause was **not** the sleep state. The out-of-tree `apple_ibridge` Touch Bar driver's HID suspend callback, `appleib_hid_suspend()`, walked an array of virtual sub-devices and dereferenced one that had already been **freed** (`appleib_remove_device()` destroys them but never clears the array slots). The resulting use-after-free Oopsed a kernel PM worker, and *that* cascade wedged HID input on resume. The fix is three small driver changes — chiefly **NULL the `sub_hdevs[]` slots the instant they're destroyed** — plus a repaired udev rule. `s2idle` was correct all along.
+> **TL;DR** — On a **MacBookPro13,2 (T1)** running Arch Linux (kernel `7.0.10`, `s2idle`), the machine **never resumed** from sleep: it would enter suspend and then wedge, requiring a hard power-down (which dropped the filesystem to read-only). The real cause is **not** the sleep state and **not** the Touch Bar driver. It's the **Apple S3X NVMe controller** (`pci 106b:2003`): on `s2idle` the kernel leaves it powered in a deep state it cannot recover from, so on wake the controller falls off the PCIe bus (`nvme … I/O timeout → Identify -4 → reset failure -5`), the root filesystem dies, and the box hangs. The fix is three knobs — **`intel_idle.max_cstate=1`** + **`nvme_core.default_ps_max_latency_us=0`** on the kernel command line, plus a udev rule pinning **`d3cold_allowed=0`** on the NVMe device. Two small `systemd-sleep` hooks then handle a Wi-Fi and a Touch Bar quirk that only become visible *once resume works at all*.
 
-> **Status:** diagnosed and patched **2026-06-05**; module rebuilt, installed, and disassembly-verified. Final resume confirmation is pending the first post-reboot suspend test (see [Validation](#validation)).
+> **Status:** ✅ **SOLVED & validated 2026-06-05.** First clean `s2idle` suspend/resume in this machine's Linux life, confirmed across three `rtcwake` cycles and a real `systemctl suspend` round-trip (lid-close path), with the Touch Bar and Wi-Fi both alive on wake.
 
-This is a sequel to [the Touch Bar fix](../touch-bar/) on the same machine — and it closes a thread that writeup left dangling.
+> **Want your agent to do this for you?** Point it at [`AGENT_SPEC.md`](./AGENT_SPEC.md) — a self-contained, gated plan.
+
+This is part of [the T1 MacBook Pro on Linux journey](../) and a sequel to [the Touch Bar fix](../touch-bar/).
 
 ---
 
 ## The machine
 
-- **MacBookPro13,2** — a 2016 13" MacBook Pro with the **T1** Touch Bar, living its second life as a distraction-free "writer's deck."
+- **MacBookPro13,2** — 2016 13" MacBook Pro with the **T1** Touch Bar, repurposed as a distraction-free "writer's deck."
 - **Arch Linux**, GNOME on Wayland, kernel **`7.0.10-arch1-1`**.
-- Sleep mode: **`s2idle`** (forced with `mem_sleep_default=s2idle`). The Touch Bar already works thanks to a [patched `apple-ib-drv`](../touch-bar/).
+- Sleep mode: **`s2idle`** (forced with `mem_sleep_default=s2idle`). On Intel Macs `s2idle` is correct — S3 ("deep") resume is broken in Apple's firmware.
+- **NVMe:** Apple S3X controller at PCI `0000:01:00.0`, ID **`106b:2003`**.
+- **Wi-Fi:** Broadcom BCM43602 (`brcmfmac`) at PCI `0000:02:00.0`.
 
-## The symptom — and why duration was the whole clue
+## The symptom
 
-| Sleep length | What happened |
-|---|---|
-| **Short** (a minute or two) | Touch the trackpad or a key → lock screen → type the password → back to the desktop. Flawless. |
-| **Longer** (left idle) | No wake on input. After a while the lock screen *does* paint — but it accepts **no keystrokes**. Frozen. Only a hard power-down recovers it. |
+Every real suspend ended the same way: screen off, then nothing. No wake on key, lid, or power button — only a forced power-down brought it back, and because the filesystem had gone read-only mid-crash, the next boot replayed the journal. In the kernel log, **every** suspend boot ended at `PM: suspend entry` with **no matching `PM: suspend exit`** — resume had *never once succeeded* on this machine, in either `s2idle` or `deep`.
 
-The lock screen rendering is the key tell: **the kernel resumed** (the GPU and compositor came back) but **input was dead**. That's not a sleep-state failure — it's an input-stack failure on resume. And the dependence on *duration* meant something was arming itself only after the machine had been idle a while.
+## ⚠️ The red herring: don't chase the Touch Bar driver
 
-## The trap: "it must be deep-sleep / S3 incompatibility"
+The out-of-tree `apple_ibridge` Touch Bar driver has a genuine **use-after-free** in its HID suspend callback (`appleib_hid_suspend()` walks a freed sub-device — see the decode in [the Touch Bar writeup](../touch-bar/)). It Oopses a PM worker, and it *looks* exactly like a resume bug. We patched it. **The machine still wouldn't resume.**
 
-Every instinct (and most forum threads) says *old Mac + bad resume = broken S3 deep sleep*. That's a dead end here:
-
-| Theory | Reality |
-|---|---|
-| Switch from `s2idle` to `deep` (S3) | **Backwards.** Intel Macs have broken S3 *resume* in Apple's firmware; `s2idle` is the **correct** choice. The Arch wiki says so outright. |
-| It's `suspend-then-hibernate` escalating | Not configured — `sleep.conf`/`logind.conf` were stock defaults. |
-| The `applespi` keyboard isn't resuming | On this model the keyboard **isn't on USB at all** (see below) — it's SPI, and independent. |
-| `usbcore.quirks=05ac:8600:k` to stop autosuspend | Wrong knob — `k` is `USB_QUIRK_NO_LPM` (USB-3 link power). The kernel's quirk flags (`BIT(0)`–`BIT(18)` in `usb/quirks.h`) include **no** autosuspend toggle at all; use a `power/control=on` udev rule or `usbcore.autosuspend=-1` instead. |
-
-The real answer was in the kernel log, not the wiki.
-
-## Reading the crash
-
-A prior boot's journal held the smoking gun — a kernel Oops:
-
-```
-RIP: appleib_hid_suspend+0x49/0x130 [apple_ibridge]
-Call Trace:
-  appleib_hid_suspend
-  hid_suspend
-  usb_suspend_both
-  usb_runtime_suspend     ← runtime PM, not system suspend
-  rpm_suspend
-  pm_runtime_work
-  worker_thread
-```
-
-Two facts fall out of this immediately:
-
-1. **The faulting driver is `apple_ibridge`** — the Touch Bar bridge — in its **suspend** path.
-2. **The trigger is USB runtime autosuspend** (`pm_runtime_work → usb_runtime_suspend`). The iBridge powers itself down after sitting idle. *That's the duration dependency.* Short nap → the autosuspend timer hasn't elapsed → clean resume. Long idle → the iBridge runtime-suspends → the callback runs → it crashes.
-
-Decoding the faulting instruction (`mov rax,[rax+0x90]`, with `rax` holding non-NULL garbage) against the struct layout (`pahole`) pinned it exactly:
-
-```
-[rax+0x90]  = hid_driver->suspend     (struct hid_driver.suspend is at offset 0x90)
-       rax  = sub_hdev->driver        (a garbage-but-non-NULL hid_driver *)
-```
-
-So `appleib_hid_suspend()` was calling `sub_hdev->driver->suspend(...)` where **`sub_hdev->driver` was a dangling pointer**.
-
-### Why the existing guard didn't save it
-
-The [Touch Bar fix](../touch-bar/) had already added a guard here, suspecting exactly this area:
-
-```c
-/* the touchbar-fix guard — necessary but not sufficient */
-if (sub_hdev && sub_hdev->driver) {
-    rc = forward(sub_hdev->driver, sub_hdev, args);
-    ...
-}
-```
-
-But the crash decode shows `sub_hdev->driver` was **non-NULL garbage**. A `&&` test only rejects a *NULL* pointer; it sails straight past a freed-but-non-NULL one and then faults dereferencing it. The guard was one level too shallow.
-
-## A counter-intuitive wiring fact
-
-You'd assume the dead keyboard means the keyboard device failed to resume. On a T1 MacBookPro13,2 it's stranger than that:
-
-```
-Apple SPI Keyboard   phys=applespi/input0   ─┐  driven by applespi (SPI bus)
-Apple SPI Touchpad   phys=applespi/input1   ─┘  NOT on the iBridge USB device
-
-USB iBridge 05ac:8600 ──► only the Touch Bar + virtual HIDs hang off here
-```
-
-The keyboard and trackpad are **SPI** devices, completely independent of the iBridge USB device that crashed. So the input death isn't the keyboard suspending wrong — it's **collateral damage**: the Oops kills a kernel PM worker and taints the HID subsystem, and the whole input-handling layer comes back wedged. Fix the iBridge crash and the input wedge goes with it.
-
-## Two trigger paths (and why the obvious mitigation isn't enough)
-
-The same buggy callback, `appleib_hid_suspend()`, is reachable two ways:
-
-| Path | Entry | Stopped by `power/control=on`? |
-|---|---|---|
-| **Runtime autosuspend** | `pm_runtime_work → usb_runtime_suspend` | ✅ Yes — this is the logged Oops |
-| **System suspend** (`s2idle`) | `usb_dev_suspend → hid_suspend` | ❌ **No** — system suspend quiesces every device regardless of its runtime-PM control flag |
-
-This matters enormously. Disabling USB autosuspend (the popular "fix") only severs the *runtime* path. But the real-world symptom — GNOME idle-suspends after 15 minutes — drives a **full system `s2idle`**, which calls the same crashing callback through a path that ignores `power/control` entirely. **The only complete fix is to make the driver callback itself crash-proof.**
-
-## Root cause: a use-after-free on the sub-device array
-
-`apple_ibridge` demuxes the iBridge into virtual HID sub-devices, kept in a fixed array:
-
-```c
-struct hid_device *sub_hdevs[ARRAY_SIZE(appleib_sub_hid_ids)];
-```
-
-On teardown:
-
-```c
-/* appleib_remove_device() — the bug */
-for (i = 0; i < ARRAY_SIZE(hdev_info->sub_hdevs); i++) {
-    if (hdev_info->sub_hdevs[i])
-        hid_destroy_device(hdev_info->sub_hdevs[i]);   // frees it…
-        /* …but the slot is never set back to NULL */
-}
-```
-
-After `hid_destroy_device()` the memory is freed, but **the array still points at it**. If a PM callback (`appleib_hid_suspend`) walks the array during or after a teardown, it reads a freed `sub_hdev`, follows its now-garbage `->driver`, and Oopses. The fixed-size guard "slots stay NULL" assumption only holds for slots that were *never used* — not for ones that were used and then freed.
-
-## A dead end worth documenting: the unload/reload hook that livelocked
-
-The canonical community advice for "the Touch Bar driver crashes on resume" is a `systemd` `system-sleep` hook that **unloads** `apple_ibridge` before sleep and **reloads** it after. Before trusting that in a sleep hook, we tested the unload/reload cycle **while awake** — no suspend, no risk of a hard wedge:
+The decisive test: unload the Touch Bar stack **before** suspending, so the buggy callback can't run —
 
 ```sh
-sudo rmmod apple_touchbar apple_ibridge     # clean (exit 0), bar goes dark
-sudo modprobe apple_ibridge apple_touchbar  # … and never returns
+sudo modprobe -r apple_touchbar apple_ibridge   # confirm both gone
+sudo rtcwake -m mem -s 30
 ```
 
-`rmmod` was clean and the reload re-probed every HID device with **zero Oops** — but `modprobe apple_ibridge` then **livelocked at 99.5% CPU**, stuck inside the synchronous HID re-probe in module-init. It was unkillable (`kill -9` did nothing — a kernel busy-loop), and only a reboot cleared the pegged core. The module *was* loaded and the bar *did* work; init simply never returned.
+— and it **still wedged**. That rules the Touch Bar out as the resume blocker. It was a real but *parallel* bug. **If you're here for resume, do not spend time on the iBridge driver.** (You'll still want a Touch-Bar-on-resume hook later — see "Two more quirks" — but that's polish, not the fix.)
 
-**That disqualifies the unload/reload hook**: a resume-time `modprobe` would peg a core on every wake. Testing it awake — instead of discovering it during a real resume — turned a would-be hard wedge into a harmless observation. Lesson: **de-risk destructive steps in the safe state first.**
+**Lesson #1: prove the suspect is guilty before you sentence it.** One unload-before-suspend test would have saved days.
 
-## The patch
+## Reading the real crash
 
-Three changes to the DKMS source (`/usr/src/apple-ib-drv-*/apple-ibridge.c`), all backed up as `*.pre-resume-fix`:
+The breakthrough came from one kernel command-line change — `intel_idle.max_cstate=1` (limit CPU idle depth) — plus `no_console_suspend` so the panel would show a failure even after the disk died. With those, resume got **further than ever before**: cleanly through device-resume (Wi-Fi firmware reload, efivarfs resync), through a **full task thaw** (`Restarting tasks: Done`, `OOM killer enabled`) — and *then* died:
 
-**1. NULL the slot on destroy — the core fix** (`appleib_remove_device`):
+```
+nvme nvme0: I/O tag 28 (1014) QID 0 timeout, disable controller
+nvme nvme0: Identify Controller failed (-4)
+nvme nvme0: Disabling device after reset failure: -5
+EXT4-fs error … : Detected aborted journal
+EXT4-fs (nvme0n1p2): Remounting filesystem read-only
+```
+
+The fault is in the **NVMe controller's resume re-init**, *after* every device and task callback has already succeeded. (This evidence existed only as a **phone photo** of the panel — once the root fs went read-only, `journald` lost its own disk and nothing persisted. If you debug this, keep a camera handy and use `no_console_suspend`.)
+
+## Root cause: `nvme_suspend()` keeps the Apple controller alive across `s2idle`
+
+The kernel decides how to put an NVMe controller to sleep in `nvme_suspend()` (`drivers/nvme/host/pci.c`):
 
 ```c
-if (hdev_info->sub_hdevs[i]) {
-    hid_destroy_device(hdev_info->sub_hdevs[i]);
-    hdev_info->sub_hdevs[i] = NULL;   /* kill the dangling pointer at its source */
-}
+if (pm_suspend_via_firmware() || !ctrl->npss || !pcie_aspm_enabled(pdev) ||
+    (ndev->ctrl.quirks & NVME_QUIRK_SIMPLE_SUSPEND))
+    return nvme_disable_prepare_reset(ndev, true);  // ← SAFE: full shutdown + cold re-init on resume
+// otherwise: keep the controller powered and rely on APST/ASPM low-power states
 ```
 
-**2. Harden the suspend/resume walk** (`appleib_forward_int_op`) so it can't be fooled by a stale `drvdata`, an `ERR_PTR` slot, or a cleared driver:
+On this machine **none** of those conditions hold: it's `s2idle` (so not firmware-suspend), the controller advertises non-zero power states (`npss`), PCIe **ASPM is enabled**, and `106b:2003` carries **no `NVME_QUIRK_SIMPLE_SUSPEND`**. So the kernel takes the *keep-alive* path — and the Apple S3X cannot recover from the deep idle state it's left in. On wake it never answers, times out, and drops off the bus.
 
-```c
-if (!hdev_info)                       /* drvdata can be NULL during remove races */
-    return 0;
-...
-sub_hdev = READ_ONCE(hdev_info->sub_hdevs[i]);
-if (!sub_hdev || IS_ERR(sub_hdev))    /* unused slots are NULL; add() can leave ERR_PTR */
-    continue;
-drv = READ_ONCE(sub_hdev->driver);    /* snapshot once */
-if (!drv)
-    continue;
-rc = forward(drv, sub_hdev, args);
+That's why it dies on resume and not on suspend, and why **duration didn't matter** — any real `s2idle` triggers the bad branch.
+
+## The fix — three knobs
+
+This is the [mbp-2016-linux](https://github.com/Dunedan/mbp-2016-linux) documented combo for the MacBookPro13,2, plus the idle-depth limit that first got resume off the ground:
+
+**1 & 2 — kernel command line** (`intel_idle.max_cstate=1 nvme_core.default_ps_max_latency_us=0`):
+
+- `intel_idle.max_cstate=1` — caps CPU C-states; load-bearing here (it's what first got resume past suspend-entry).
+- `nvme_core.default_ps_max_latency_us=0` — **disables APST** (Autonomous Power State Transitions), keeping the controller in a shallower state it *can* wake from.
+
+Add them to your bootloader's kernel line. On rEFInd (`/boot/refind_linux.conf`):
+
+```
+"Boot"  "root=LABEL=arch_root rw quiet mem_sleep_default=s2idle intel_idle.max_cstate=1 nvme_core.default_ps_max_latency_us=0"
 ```
 
-**3. Make the add() error-unwind NULL-safe** (`appleib_add_device`) — which also fixes a latent out-of-bounds read, since the original returned `sub_hdevs[i]` *after* `while (i-- > 0)` had left `i == -1`:
-
-```c
-if (IS_ERR(hdev_info->sub_hdevs[i])) {
-    void *err = hdev_info->sub_hdevs[i];        /* capture before the loop mangles i */
-    while (i-- > 0)
-        if (hdev_info->sub_hdevs[i])            /* skip NULL (unmatched) slots */
-            hid_destroy_device(hdev_info->sub_hdevs[i]);
-    return err;
-}
-```
-
-Plus a **repaired udev rule** that re-pins the iBridge to `power/control=on` (and `autosuspend_delay_ms=-1`) on `add`/`bind`/`change`. With the driver now crash-proof on both paths this is belt-and-suspenders, but it also stops the wasteful runtime churn — and the previous rule was silently half-broken (its `power/control=on` never stuck, because `39-usbmuxd.rules` re-touches the same `05ac:8600` device).
-
-## Reproduce it
-
-> For a T1 MacBook (MacBookPro13,2 / 14,x) on a modern kernel, with the [Touch Bar driver](../touch-bar/) already installed.
+**3 — disable D3cold for the NVMe device, persistently.** `d3cold_allowed` is a runtime sysfs attribute that resets to `1` every boot, so pin it with a udev rule matched by PCI vendor/device (not bus path):
 
 ```sh
-# 1. Confirm the bug class: an appleib_hid_suspend Oops in the journal,
-#    and the iBridge armed for autosuspend.
-journalctl -k | grep -i appleib_hid_suspend
-cat /sys/bus/usb/devices/1-3/power/control      # 05ac:8600 "iBridge"
-
-# 2. Patch /usr/src/apple-ib-drv-*/apple-ibridge.c with the three changes above
-#    (back up the originals first: cp apple-ibridge.c apple-ibridge.c.pre-resume-fix)
-
-# 3. Rebuild + install for your running kernel (DKMS re-signs for Secure Boot)
-sudo dkms build  apple-ib-drv/<version> -k "$(uname -r)" --force
-sudo dkms install apple-ib-drv/<version> -k "$(uname -r)" --force
-
-# 4. (belt-and-suspenders) keep the iBridge out of USB autosuspend
-sudo tee /etc/udev/rules.d/99-apple-ibridge-no-autosuspend.rules >/dev/null <<'EOF'
-ACTION=="add",    SUBSYSTEM=="usb", ATTR{idVendor}=="05ac", ATTR{idProduct}=="8600", TEST=="power/control", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="-1"
-ACTION=="bind",   SUBSYSTEM=="usb", ATTR{idVendor}=="05ac", ATTR{idProduct}=="8600", TEST=="power/control", ATTR{power/control}="on"
-ACTION=="change", SUBSYSTEM=="usb", ATTR{idVendor}=="05ac", ATTR{idProduct}=="8600", TEST=="power/control", ATTR{power/control}="on"
+sudo tee /etc/udev/rules.d/99-nvme-d3cold-resume-fix.rules >/dev/null <<'EOF'
+# Apple S3X NVMe (106b:2003) wedges on s2idle resume unless D3cold is disabled.
+# d3cold_allowed resets to 1 each boot, so pin it to 0 here.
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x106b", ATTR{device}=="0x2003", ATTR{d3cold_allowed}="0"
 EOF
-
-# 5. Reboot to load the patched module. (Don't try to hot-reload apple_ibridge —
-#    its module-init livelocks on a manual reload; see the dead end above.)
-sudo reboot
 ```
 
-> ⚠️ Same persistence caveat as the Touch Bar fix: **DKMS rebuilds the patch across kernel updates, but an AUR package update of `apple-ib-drv-dkms-git` overwrites the patched source.** Pin it with `IgnorePkg` and re-apply from the `*.pre-resume-fix` backups after any deliberate update.
+Reboot, then **verify before you trust it**:
+
+```sh
+grep -o 'intel_idle.max_cstate=1' /proc/cmdline                   # present
+cat /sys/module/nvme_core/parameters/default_ps_max_latency_us    # 0
+cat /sys/bus/pci/devices/0000:01:00.0/d3cold_allowed              # 0  ← the udev rule fired
+```
+
+> Adjust `0000:01:00.0` to your NVMe's address (`lspci | grep -i nvme`). The udev rule keys on `106b:2003`, so it follows the device regardless of slot.
+
+### Things that do *not* work (so you don't try them)
+
+| Tempting knob | Reality |
+|---|---|
+| `pcie_aspm=off` | **No-op on Macs.** Apple firmware doesn't grant the OS ASPM control via ACPI `_OSC`, so the kernel sets `aspm_disabled` and **silently ignores** `pcie_aspm=off`. `lspci -vv` still shows `ASPM L1.2 Enabled`. To actually force it you'd need `pcie_aspm=force pcie_aspm.policy=performance` — but you don't need to: the APST + D3cold combo fixes it without touching ASPM. |
+| `mem_sleep_default=deep` (S3) | **Backwards.** Intel Macs have broken S3 resume in firmware; `s2idle` is correct. |
+| Swapping the NVMe SSD / cabling | It's a controller power-state interaction, not a hardware fault. |
+
+### Alternative one-liner (if you'd rather force the safe branch directly)
+
+This kernel's `nvme.ko` supports a named-quirk override. You can apply the missing quirk to *only* the Apple controller from the command line:
+
+```
+nvme.quirks=106b:2003:simple_suspend
+```
+
+That flips `nvme_suspend()` to the full-shutdown branch for that device. It's a clean alternative to the APST/D3cold combo (verify with `dmesg | grep -i quirk` showing no "unrecognized quirk"). We shipped the documented APST + D3cold combo because it's the tested-on-this-model recipe, but either should work.
+
+## Two more quirks that only appear *after* resume works
+
+Once the machine actually came back, two devices turned out not to survive the round-trip. Both are handled with `systemd-sleep` hooks (run automatically on real `systemctl suspend` / lid-close). **Note: `rtcwake` bypasses these hooks** — test them with a real suspend.
+
+### Wi-Fi (`brcmfmac`) wedges its firmware on resume
+
+After the first resume the BCM43602's msgbuf ring is stuck (`brcmf_msgbuf_tx_ioctl: Failed to reserve space in commonring`, scans fail with `-12`/ENOMEM), `wlan0` goes down, and — worse — the wedged device then returns `-5` from `.suspend` and **blocks the next suspend entirely**. `modprobe -r brcmfmac` fails (NetworkManager/wpa_supplicant hold it), so the working reset is a **PCI driver unbind/rebind**. Keep the card out of the suspend path (unbind in `pre`) and re-probe fresh firmware in `post`:
+
+```sh
+sudo tee /usr/lib/systemd/system-sleep/60-brcmfmac-wifi.sh >/dev/null <<'EOF'
+#!/bin/bash
+# BCM43602 brcmfmac firmware does not survive s2idle resume (commonring wedge,
+# then -5 on .suspend blocks the next sleep). modprobe -r fails (module in use),
+# so unbind the PCI device before sleep and rebind it after.
+DEV="0000:02:00.0"
+DRV="/sys/bus/pci/drivers/brcmfmac"
+case "$1" in
+  pre)  [ -e "$DRV/$DEV" ] && echo "$DEV" > "$DRV/unbind" 2>/dev/null
+        logger -t brcmfmac-sleep-hook "unbound $DEV before $2" ;;
+  post) [ ! -e "$DRV/$DEV" ] && [ -e "/sys/bus/pci/devices/$DEV" ] && echo "$DEV" > "$DRV/bind" 2>/dev/null
+        logger -t brcmfmac-sleep-hook "rebound $DEV after $2" ;;
+esac
+exit 0
+EOF
+sudo chmod 0755 /usr/lib/systemd/system-sleep/60-brcmfmac-wifi.sh
+```
+
+(Set `DEV` to your Wi-Fi PCI address — `lspci | grep -i network`.) For the underlying *association* fix on this card, see the [Wi-Fi writeup](../wifi/).
+
+### Touch Bar needs a USB power-cycle on resume
+
+A plain `modprobe -r` / `modprobe` of the Touch Bar stack after resume leaves the iBridge firmware endpoint stuck (`apple-touchbar … tb: hw open failed (-19)` / ENODEV) and the bar dark. The fix is to **deauthorize → reauthorize** the iBridge USB device (`05ac:8600`) to force a clean re-enumeration before reloading. The full hook (find-by-VID/PID, unload in `pre`, USB-reset + reload in `post`) is in [`50-apple-ibridge-touchbar.sh`](./50-apple-ibridge-touchbar.sh):
+
+```sh
+sudo install -m0755 50-apple-ibridge-touchbar.sh /usr/lib/systemd/system-sleep/
+```
 
 ## Validation
 
-The fix is rigorously **diagnosed** (oops decode + `pahole` offsets + disassembly of the rebuilt module confirming the new guards are present) and **built/installed**, but the final proof is a clean resume — which needs an actual suspend. Validate **in person**, never unattended, because a failed resume on this machine means a hard power-down:
+Validate **in person**, never unattended — a failed resume on this machine means a hard power-down.
 
 ```sh
-# After reboot, with you watching, a short self-waking suspend:
-sudo rtcwake -m mem -s 20      # wakes itself after 20 s
-# Then a real long idle. Check the journal came back clean:
-journalctl -k -b | grep -i appleib_hid_suspend    # expect nothing
+# Self-waking suspend (bypasses the sleep hooks, but proves the NVMe fix):
+sudo rtcwake -m mem -s 60
+# Real suspend that ALSO runs the hooks (lid-close path):
+sudo rtcwake -m no -s 120 && sudo systemctl suspend
+
+# After wake, expect ALL of:
+cat /sys/power/suspend_stats/success     # incremented
+cat /sys/power/suspend_stats/fail        # NOT incremented
+journalctl -k -b 0 | grep -c 'PM: suspend exit'                     # ≥1
+mount | grep ' / '                                                  # still rw
+sudo dmesg | grep -icE 'nvme[0-9].*(timeout|fail|reset|Identify)'   # 0
+cat /sys/class/net/wlan0/operstate                                  # up
+# and a human: Touch Bar lit, keyboard + trackpad respond.
 ```
 
-If a residual crash ever appears, the fallback is to no-op the HID suspend/resume forwarding entirely (the bar re-inits on resume), mirroring the community unload approach without the livelock.
+On this machine: three clean `rtcwake` cycles (60s and 180s) plus a real `systemctl suspend` round-trip (suspended → RTC-woke 2 min later → both hooks fired → Touch Bar live, Wi-Fi reconnected, `success=1 fail=0`, zero nvme errors, root still `rw`).
+
+### Benign noise you can ignore
+
+During resume the panel shows Thunderbolt/PCIe complaints — `pcieport … Unable to change power state from D3cold to D0, device inaccessible`, `thunderbolt … not ready N ms after resume; giving up`, and even a `WARNING … tb_cfg_read` stack trace. These are **cosmetic** (Alpine Ridge controllers with nothing attached). A `WARNING` prints a trace but does not halt the kernel — if you also see `Restarting tasks` and the machine comes back, you're fine.
 
 ## Lessons
 
-- **The symptom lied; the call trace didn't.** "Bad resume" screamed *deep-sleep incompatibility*; the kernel log said *driver use-after-free*. Read the trace.
-- **A guard is only as deep as the pointer you actually dereference.** `if (sub_hdev && sub_hdev->driver)` looked safe but faulted one level down, on `driver->suspend`.
-- **Fix lifecycle bugs at the source.** Validating pointers in the hot path is a band-aid; clearing the slot when you free it removes the dangling pointer entirely.
-- **De-risk in the safe state.** Exercising the unload/reload cycle *awake* caught a livelock that would have been a recurring hard wedge if shipped in a sleep hook.
-- **Know which mitigation covers which path.** Disabling runtime autosuspend never touches the system-suspend path — the one that actually bites on a long idle.
+- **The symptom lied; the call trace didn't — twice.** "Bad resume" first pointed at deep-sleep, then at the Touch Bar driver. Reading the actual crash (NVMe controller off-bus) was the only thing that mattered.
+- **Prove the suspect.** Unloading the Touch Bar before suspend — and watching it *still* fail — is what cleared the red herring. Cheap test, days saved.
+- **Know which power layer you're in.** APST (intra-controller), ASPM (PCIe link), and D3cold (PCI device power) are different knobs. `pcie_aspm=off` being a silent no-op on Macs is a classic time-sink.
+- **`rtcwake` ≠ a real suspend.** It bypasses `systemd-sleep` hooks, so it can't validate the Wi-Fi/Touch-Bar resume hooks — use `systemctl suspend` for those.
+- **Capture the panel.** When the root fs dies on resume, the journal can't record the death. `no_console_suspend` + a phone camera was the only evidence.
 
 ## Upstream
 
-The missing `sub_hdevs[i] = NULL` in `appleib_remove_device()` (and the shallow suspend-walk guard) live in the `apple-ib-drv` forks (t2linux, AdityaGarg8). If you maintain one, this is worth upstreaming so the next T1 owner doesn't lose a resume cycle to it.
+The clean fix would be a `NVME_QUIRK_SIMPLE_SUSPEND` entry for `106b:2003` in the kernel's `nvme_id_table` (the same quirk other Apple controllers already carry). Until then, the command-line `nvme.quirks=106b:2003:simple_suspend` override or the APST/D3cold combo above are the user-space-only paths.
 
 ---
 
