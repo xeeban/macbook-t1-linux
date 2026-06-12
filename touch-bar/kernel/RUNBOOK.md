@@ -9,6 +9,22 @@ firmware self-resetting on live 1→2 switches; both paths are closed here.
 
 All commands need root unless noted. Device path: `/sys/bus/usb/devices/1-3`.
 
+## ✅ STATUS (2026-06-12): Phase 1 VALIDATED on real T1 hardware
+
+The kernel path works: `apple_dfr_cfgsel` selects config 2 at enumeration and it **holds**, `appletbdrm` binds the AV interface, GINF succeeds, `/dev/dri/card0` appears, `[drm] Initialized appletbdrm 1.0.0`. Reproducible across a reboot (session-only insmod; not yet DKMS-persistent).
+
+Two T1 adaptations were needed in `appletbdrm.c` to get there (now in the source):
+- **RGB888** plane format + `drm_fb_xrgb8888_to_rgb888` (T1 panel byte order is R,G,B; T2 is BGR).
+- **GINF read drains transient post-switch messages** + `usb_clear_halt` on both pipes in probe (T1 emits a readiness signal and a short ~52-byte status before the 65-byte GINF reply; without draining, probe failed `-EBADMSG`/`-74`).
+- **16-byte frame-ack tolerance** in `flush_damage` (T1 acks a frame with a 16-byte header, not T2's 40-byte UDCL).
+
+**Not yet validated:** an actual rendered frame on the panel — `modetest` is blocked because GNOME/mutter holds DRM master on `card0`. NEXT SESSION, in order:
+1. **udev rule to release `card0` from the desktop seat** (so mutter doesn't grab master) — required before any renderer (modetest/tiny-dfr) can drive it from within a GNOME session. (Quick alt to just *see* it: `sudo chvt 3` to a bare VT, then modetest — no Touch Bar F-keys needed for `chvt`.)
+2. **`tiny-dfr`** pointed at `card0` → real drawn function row.
+3. **T1 touch shim**: the digitizer is a non-standard float32-X HID on interrupt EP `0x83` (range [0.5,1.0]); needs translating to input events (the userspace `dfr-switch.c buttons` stage prototypes this).
+
+**Gotcha:** to restore the stock bar, load BOTH modules with `sudo modprobe -a apple_ibridge apple_touchbar` (separate args!) — `modprobe apple_ibridge apple_touchbar` treats the second as a param and silently doesn't load `apple_touchbar`, leaving the bar dead.
+
 ## Phase 1 — session-only smoke test (no DKMS, fast iteration)
 
 ```sh

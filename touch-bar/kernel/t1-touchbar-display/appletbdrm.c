@@ -179,8 +179,7 @@ static int appletbdrm_read_response(struct appletbdrm_device *adev,
 {
 	struct usb_device *udev = adev_to_udev(adev);
 	struct drm_device *drm = &adev->drm;
-	int ret, actual_size;
-	bool readiness_signal_received = false;
+	int ret, actual_size, attempts = 0;
 
 retry:
 	ret = usb_bulk_msg(udev, usb_rcvbulkpipe(udev, adev->in_ep),
@@ -191,30 +190,18 @@ retry:
 	}
 
 	/*
-	 * The device responds to the first request sent in a particular
-	 * timeframe after the USB device configuration is set with a readiness
-	 * signal, in which case the response should be read again
+	 * Right after the config switch the T1 firmware emits transient messages
+	 * before the real reply -- a readiness signal (REDY) and a short status
+	 * message (observed 52 bytes on the GINF read). Treat anything that isn't
+	 * the expected, full-size response as transient, drain it and re-read, up
+	 * to a small bound.
 	 */
-	if (response->msg == APPLETBDRM_MSG_SIGNAL_READINESS) {
-		if (!readiness_signal_received) {
-			readiness_signal_received = true;
+	if (actual_size != size || response->msg != expected_response) {
+		if (++attempts < 8)
 			goto retry;
-		}
-
-		drm_err(drm, "Encountered unexpected readiness signal\n");
-		return -EINTR;
-	}
-
-	if (actual_size != size) {
-		drm_err(drm, "Actual size (%d) doesn't match expected size (%zu)\n",
-			actual_size, size);
+		drm_err(drm, "No valid response after draining (last size %d, msg %p4cl, expected %p4cl)\n",
+			actual_size, &response->msg, &expected_response);
 		return -EBADMSG;
-	}
-
-	if (response->msg != expected_response) {
-		drm_err(drm, "Unexpected response from device (expected %p4cl found %p4cl)\n",
-			&expected_response, &response->msg);
-		return -EIO;
 	}
 
 	return 0;
@@ -311,7 +298,7 @@ static int appletbdrm_connector_helper_get_modes(struct drm_connector *connector
 }
 
 static const u32 appletbdrm_primary_plane_formats[] = {
-	DRM_FORMAT_BGR888,
+	DRM_FORMAT_RGB888,   /* T1 panel byte order is R,G,B (T2 is BGR) */
 	DRM_FORMAT_XRGB8888, /* emulated */
 };
 
@@ -428,7 +415,7 @@ static int appletbdrm_flush_damage(struct appletbdrm_device *adev,
 
 		switch (fb->format->format) {
 		case DRM_FORMAT_XRGB8888:
-			drm_fb_xrgb8888_to_bgr888(&dst, NULL, &shadow_plane_state->data[0], fb, &damage, &shadow_plane_state->fmtcnv_state);
+			drm_fb_xrgb8888_to_rgb888(&dst, NULL, &shadow_plane_state->data[0], fb, &damage, &shadow_plane_state->fmtcnv_state);
 			break;
 		default:
 			drm_fb_memcpy(&dst, NULL, &shadow_plane_state->data[0], fb, &damage);
@@ -450,15 +437,21 @@ static int appletbdrm_flush_damage(struct appletbdrm_device *adev,
 	if (ret)
 		goto end_fb_cpu_access;
 
-	ret = appletbdrm_read_response(adev, &response->header, sizeof(*response),
-				       APPLETBDRM_MSG_UPDATE_COMPLETE);
-	if (ret)
-		goto end_fb_cpu_access;
+	/*
+	 * T1 (05ac:8600) answers a framebuffer update with a SHORT 16-byte header
+	 * ack (size=0x10), not T2's 40-byte UDCL response. Don't require the UDCL
+	 * msg or a matching timestamp; just drain the IN endpoint (a short bulk
+	 * read is not an error) so the next update stays in sync.
+	 */
+	{
+		struct usb_device *udev = adev_to_udev(adev);
+		int ack_size = 0;
 
-	if (response->timestamp != footer->timestamp) {
-		drm_err(drm, "Response timestamp (%llu) doesn't match request timestamp (%llu)\n",
-			le64_to_cpu(response->timestamp), timestamp);
-		goto end_fb_cpu_access;
+		ret = usb_bulk_msg(udev, usb_rcvbulkpipe(udev, adev->in_ep),
+				   response, sizeof(*response), &ack_size,
+				   APPLETBDRM_BULK_MSG_TIMEOUT);
+		if (ret)
+			goto end_fb_cpu_access;
 	}
 
 end_fb_cpu_access:
@@ -760,6 +753,15 @@ static int appletbdrm_probe(struct usb_interface *intf,
 	} else {
 		drm_warn(drm, "buffer sharing not supported"); /* not an error */
 	}
+
+	/*
+	 * Mirror the proven userspace bring-up (and the Windows DFRDisplayKm): reset
+	 * the bulk pipes after the config switch so a stale/transient post-switch
+	 * message (T1 emits a short ~52-byte status before the GINF reply) doesn't
+	 * desync the first read.
+	 */
+	usb_clear_halt(adev_to_udev(adev), usb_sndbulkpipe(adev_to_udev(adev), adev->out_ep));
+	usb_clear_halt(adev_to_udev(adev), usb_rcvbulkpipe(adev_to_udev(adev), adev->in_ep));
 
 	ret = appletbdrm_get_information(adev);
 	if (ret) {
