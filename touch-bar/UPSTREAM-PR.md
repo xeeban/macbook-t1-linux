@@ -1,8 +1,14 @@
 # Upstream PR draft — t2linux/apple-ib-drv (branch `mbp15`)
 
+> ## ✅ FILED → https://github.com/t2linux/apple-ib-drv/pull/11
+> Opened 2026-06-12 (`xeeban:fix/appleib-add-device-oob → mbp15`, +45/−13). The patch was regenerated
+> against pristine upstream (this repo's DKMS tree already carries the round-one `ll_parse` fix that
+> upstream lacks, which shifts the line numbers) and **build-tested clean** against 7.0.10 headers before
+> filing. Note: `t2linux/apple-ib-drv` has **issues disabled**, so the PR carries the full bug report.
+> The draft below is what was filed.
+>
 > Patch file: [`ibridge-teardown-fix.preview.diff`](./ibridge-teardown-fix.preview.diff) ·
 > Analysis: [`IBRIDGE-TEARDOWN-UAF-ANALYSIS.md`](./IBRIDGE-TEARDOWN-UAF-ANALYSIS.md)
-> Apply the diff to `apple-ibridge.c` and open the PR with the title/body below.
 
 ---
 

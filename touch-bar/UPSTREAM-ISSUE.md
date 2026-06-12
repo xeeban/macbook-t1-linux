@@ -1,5 +1,9 @@
 # Upstream issue draft — apple-ib-drv
 
+> **Note:** `t2linux/apple-ib-drv` has **issues disabled**, so this was filed as a **pull request**
+> instead — **https://github.com/t2linux/apple-ib-drv/pull/11** — whose body carries the bug report.
+> Kept here as the standalone bug write-up (e.g. for a mainline report or another fork).
+
 > **File against → https://github.com/t2linux/apple-ib-drv** (branch `mbp15`) — the repo the
 > `apple-ib-drv-dkms-git` AUR package builds from. Original code author: **Ronald Tschalär**
 > (GitHub **roadrunner2**, from `macbook12-spi-driver`) — credit/reference him.

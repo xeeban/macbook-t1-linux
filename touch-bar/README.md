@@ -210,6 +210,8 @@ journalctl -b 0 | grep -iE 'touchbar-relight|tb-relight-reload'
 
 ## Upstream
 
+> **Filed:** the heap-OOB fix (#2 below) is up as a PR — **[t2linux/apple-ib-drv#11](https://github.com/t2linux/apple-ib-drv/pull/11)** (build-tested, scoped to the T1 iBridge path, inert on T2).
+
 Three things worth fixing in the `apple-ib-drv` forks (t2linux, AdityaGarg8) so the next T1 owner doesn't lose a weekend:
 
 1. **The gutted `appleib_ll_parse()` no-op** (round one) — a dark bar on every kernel.

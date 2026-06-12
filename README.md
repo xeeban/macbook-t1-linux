@@ -24,7 +24,7 @@ Turning a **2016 13" MacBook Pro with the Touch Bar (MacBookPro13,2, the "T1" ge
 
 ¹ Fixed for standard APs (DHCP + internet, validated). A **mesh** router that enforces 802.11r/band-steering still rejects association (`status 16`) — an AP-side limitation, not the card; details in the [Wi-Fi writeup](./wifi/#known-limitation).
 
-² The OOB (#7) was **found and proven by an overnight [Fable](https://www.anthropic.com) agent** doing read-only kernel forensics — the load-bearing discovery; see [THE-RELIGHT-HUNT.md](./touch-bar/THE-RELIGHT-HUNT.md).
+² The OOB (#7) was **found and proven by an overnight [Fable](https://www.anthropic.com) agent** doing read-only kernel forensics — the load-bearing discovery; see [THE-RELIGHT-HUNT.md](./touch-bar/THE-RELIGHT-HUNT.md). The fix is filed upstream: **[t2linux/apple-ib-drv#11](https://github.com/t2linux/apple-ib-drv/pull/11)**.
 
 > **Where it stands:** all seven addressed and the deck is in daily use. Touch Bar lit, Wi-Fi connected, sound working, **Bluetooth paired (A2DP audio confirmed)**. On sleep: `s2idle` suspend/resume is reliable for **short cycles** (validated 2026-06-05), but a **multi-hour real-world idle can still wedge** the machine (hit 2026-06-11) — so for stepping away, **hibernate (S4) is the dependable path**: full power-off, session restored in ~42 s on power-on, Wi-Fi intact, and the **Touch Bar now auto-relights ~5 s after resume** (#7; validated 2026-06-12).
 
