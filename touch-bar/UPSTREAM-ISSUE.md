@@ -1,6 +1,11 @@
 # Upstream issue draft — apple-ib-drv
 
-> File against whichever `apple-ib-drv` fork you use (e.g. AdityaGarg8/apple-ib-drv, t2linux).
+> **File against → https://github.com/t2linux/apple-ib-drv** (branch `mbp15`) — the repo the
+> `apple-ib-drv-dkms-git` AUR package builds from. Original code author: **Ronald Tschalär**
+> (GitHub **roadrunner2**, from `macbook12-spi-driver`) — credit/reference him.
+> **Confirmed in pristine upstream:** `apple-ibridge.c` lines **403** (`for (i = 0; i < hdev->maxcollection; i++)`)
+> and **411** (`hdev_info->sub_hdevs[i] = appleib_add_sub_dev(...)`).
+>
 > The headline is the heap out-of-bounds write; the other two are noted as related. Copy from the `---` below.
 
 ---
