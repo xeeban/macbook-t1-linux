@@ -117,3 +117,46 @@ the half-dead one:
 and confirm (a) the unbind completes with no `D`-state, (b) the rebind relights the bar. Only if that is
 clean, wire it into the `pre` hook and test a real hibernate. Keep a watchdog and a `D`-state self-check;
 never tear down the half-dead post-resume endpoint again.
+
+---
+
+## UPDATE 2 — Session continued (2026-06-11 ~21:00): driver patch + the real blocker
+
+Pursued an in-driver fix instead of sleep hooks. Findings:
+
+### Pre/post sleep-hook approach — tested and ABANDONED (kernel-level failures)
+- **`pre`-unbind on a LIVE endpoint is safe** (validated: `unbind` returns instantly, no `D`-state) and a
+  `bind` relights a live bar. But across a real hibernate, **`post`-bind on the reset-resumed endpoint left
+  the bar DARK** (HID re-enumerates, but the display `SET_REPORT` is silently dropped).
+- **`post`-power-cycle-while-unbound GPF'd the kernel**: `echo 0 > authorized` → `appleib_remove_device`
+  → `hid_destroy_device` → `__list_del_entry_valid` **use-after-free** (`remove_nodes`, non-canonical ptr
+  = freed sub_hdev reused by report data). SEGV'd the hook, wedged a USB kworker → reboot.
+- **Conclusion:** every USB teardown of the iBridge crashes (GPF) or deadlocks the buggy `apple_ibridge`
+  teardown. The 50-hook (skip hibernate) stays; the 51-/relight scripts are dead — do not deploy.
+
+### Driver patch #1 — `set_tb_disp` via `hid_hw_raw_request` (DONE, good, but not sufficient)
+Root cause refinement: post-resume `set_tb_mode` works (direct `usb_control_msg` on `mode_iface.usb_iface`,
+~line 256) but `set_tb_disp` sent the display report via `hid_hw_request(disp_iface.hdev)` →
+`appleib_ll_request` → the iBridge's **usbhid interrupt-OUT queue, which goes STALE across hibernate** →
+display report silently dropped → dark.
+
+Fix (in `../touch-bar/`): patch `appletb_set_tb_disp` to send via **`hid_hw_raw_request`** — a synchronous
+`SET_REPORT` on EP0 (a CLASS request; a first try using a direct `usb_control_msg` with `USB_TYPE_VENDOR`
+copied from `set_tb_mode` returned **`-32`/-EPIPE** because vendor type is a mode-report quirk), with an
+`-EPIPE` retry loop like `set_tb_mode`. **Result: the `-32` error is gone** (cold boot logs no
+`Failed to set touch bar display`). Files: `touch-bar/disp-direct-usb.insert.c`, `patch-and-build.sh`,
+`revert-driver-patch.sh`. **Keep this patch — it's a genuine correctness fix.**
+
+### The REAL remaining blocker — firmware needs re-enumeration; `apple_ibridge` teardown is buggy
+Even with `set_tb_disp(ON)` now **succeeding** (no error) post-resume, **the bar stays DARK** — confirmed by
+a manual `idle_timeout` -2/-1 re-drive that lit nothing. So the touch-bar **firmware** requires the full USB
+**re-enumeration** (cold-boot path) to relight; a successful display command alone is not enough. The
+re-enumeration (USB power-cycle) is *proven* to relight the bar, but it crashes `apple_ibridge`'s sub-HID
+teardown (the UAF above).
+
+**⇒ Next fix = the `apple_ibridge` teardown UAF.** Suspect: `appleib_add_device` (apple-ibridge.c 418-453)
+fills `sub_hdevs[i]` indexed by `i < hdev->maxcollection`, while `appleib_remove_device` (455-471) and the
+report forwarders iterate `i < ARRAY_SIZE(sub_hdevs)` — an index/lifecycle mismatch that can free/destroy
+the wrong slot or double-free. Fix it → the post-resume USB power-cycle becomes safe → bar relights
+reliably (cold-boot mechanism). An overnight analysis run is drafting candidate patches for this (see
+`touch-bar/` for the UAF analysis + candidate patch landing in the morning).
