@@ -6,6 +6,8 @@ Why this 2016 MacBook Pro never came back from sleep under Linux — and why the
 
 > **Status:** ✅ **SOLVED & validated 2026-06-05.** First clean `s2idle` suspend/resume in this machine's Linux life, confirmed across three `rtcwake` cycles and a real `systemctl suspend` round-trip (lid-close path), with the Touch Bar and Wi-Fi both alive on wake.
 
+> **⚠️ Caveat learned later (2026-06-11):** this fix is solid for **short** suspend/resume cycles, but a **multi-hour real-world idle still wedged the machine** (hard reboot required). Over long `s2idle` the Apple NVMe/PCIe power interaction can still land somewhere it can't recover from. For *stepping away*, the dependable answer is **hibernate (S4)** — full power-off, cold NVMe init on resume, the wake bug sidestepped entirely. See [`../hibernate/`](../hibernate/). The fix below is still correct and worth doing — it's what makes the brief-suspend path and hibernate's device-resume both work — just don't trust plain `s2idle` for hours-long walk-aways.
+
 > **Want your agent to do this for you?** Point it at [`AGENT_SPEC.md`](./AGENT_SPEC.md) — a self-contained, gated plan.
 
 This is part of [the T1 MacBook Pro on Linux journey](../) and a sequel to [the Touch Bar fix](../touch-bar/).

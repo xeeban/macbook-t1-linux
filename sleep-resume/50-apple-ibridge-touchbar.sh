@@ -34,8 +34,18 @@
 
 set -u
 
+# 2026-06-11: 'hibernate' deliberately removed from this match list.
+# This hook's unload step (modprobe -r apple_touchbar) can deadlock the kernel:
+# appletb_remove -> cancel_delayed_work_sync waits forever, leaving modprobe in
+# uninterruptible D-state (survives SIGKILL). When that races a hibernate freeze
+# the freeze aborts ("2 tasks refusing to freeze") and the only recovery is a
+# hard reboot (observed 2026-06-11, hibernate cycle #4 under lid automation).
+# The hook exists only to dodge the s2idle suspend-CALLBACK use-after-free
+# (see header). Pure hibernate powers off and cold-reinits the Touch Bar stack
+# on resume WITHOUT entering those callbacks, so the unload/reload is both
+# unnecessary and dangerous on this path. Kept for the s2idle family only.
 case "$2" in
-    suspend|hibernate|suspend-then-hibernate|hybrid-sleep) ;;
+    suspend|suspend-then-hibernate|hybrid-sleep) ;;
     *) exit 0 ;;
 esac
 
