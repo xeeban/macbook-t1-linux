@@ -4,7 +4,7 @@ How a one-line no-op in an out-of-tree driver kept the Touch Bar **dark on every
 
 > **TL;DR** — On a **MacBookPro13,2 (T1)** running Arch Linux (kernel `7.0.10`), the Touch Bar stayed dark because the out-of-tree `apple-ib-drv` driver (rev `r307`) shipped its `appleib_ll_parse()` HID hook **gutted to a no-op**. With no report descriptor, the kernel's `hid_add_device()` rejected the bar's virtual sub-devices with `-ENODEV`, so nothing ever bound. Restoring the real `hid_parse_report()` call (plus two robustness fixes) lights the bar — esc, F-keys, brightness, and volume all work and survive reboot.
 
-There are [slides](./presentation.md) too (Marp).
+There are [slides](./presentation.md) too (Marp). And a **[sequel](#sequel--the-touch-bar-goes-dark-after-hibernate)**: lighting the bar at boot was round one — keeping it lit *across hibernate* was an ~8-reboot, all-night hunt with two more kernel bugs and [a story of its own](./THE-RELIGHT-HUNT.md).
 
 **Want your own agent to just do it?** Hand [`AGENT_SPEC.md`](./AGENT_SPEC.md) to a coding agent (Claude Code, etc.) and say *"follow AGENT_SPEC.md to make my Touch Bar work."* It's a self-contained spec + phased plan with GO/NO-GO gates, the exact patch, guardrails, and rollback.
 
@@ -151,6 +151,56 @@ sudo dmesg | grep -iE 'oops|BUG|warning'  # expect none
 
 > ⚠️ **DKMS rebuilds the patch on kernel updates, so the fix persists — but an AUR package update of `apple-ib-drv-dkms-git` would overwrite the patched source.** That's why step 6 pins it via `IgnorePkg`. `pacman`/`yay` will still *notify* you that an update exists (good — you stay informed), they just won't install it. When you genuinely want to update: temporarily remove the `IgnorePkg` entry (or `yay -S apple-ib-drv-dkms-git`), then **re-apply the patch from the `*.orig` backups before rebuilding**.
 
+## Sequel — the Touch Bar goes dark after hibernate
+
+Lighting the bar at boot was round one. Round two showed up months later, once [hibernate (S4)](../hibernate/) became the way to step away from the machine: **after every resume from hibernate, the Touch Bar came back dark.** No esc, no F-keys — until the next full reboot.
+
+It took an ~8-reboot, all-night hunt (full story: [**THE-RELIGHT-HUNT.md**](./THE-RELIGHT-HUNT.md)) to land three things:
+
+### Bug A — a heap out-of-bounds write that crashes *every* iBridge teardown
+
+The real villain, and it bites every T1 regardless of hibernate. `appleib_add_device()` fills the **2-slot** `sub_hdevs[]` array but indexes it by the **raw HID collection number**. The T1's combined display/ALS interface has **7 collections** (ALS `[0]`, five nested sensor collections — the `Unknown collection` boot warnings — and the Touch Bar display at `[6]`), so it writes `sub_hdevs[6]`: **24 bytes past the end of a 32-byte `devm` allocation**, clobbering the adjacent devres node. From then on *any* teardown (`modprobe -r`, USB unbind, a re-enumerate) walks the planted pointer and **GPFs** in `remove_nodes` / `__list_del_entry_valid`. (Proof it's the descriptor: the crash-register addresses are byte-for-byte the first 16 bytes of the live report descriptor — a `hid_device`'s first member is `dev_rdesc`.)
+
+**Fix:** index `sub_hdevs[]` by the *matched* sub-device-id slot (`dev_id - appleib_sub_hid_ids`, always `{0,1}`), not the raw collection index. → [`ibridge-teardown-fix.insert.c`](./ibridge-teardown-fix.insert.c) · [`IBRIDGE-TEARDOWN-UAF-ANALYSIS.md`](./IBRIDGE-TEARDOWN-UAF-ANALYSIS.md) · apply with [`patch-ibridge-teardown-and-build.sh`](./patch-ibridge-teardown-and-build.sh).
+
+> This one was **found and proven by an overnight [Fable](https://www.anthropic.com) agent** doing read-only kernel forensics while the machine sat idle — the load-bearing discovery of the whole effort. The same bug means the "first crash" most T1 users hit on driver unload is *this*, not bad luck.
+
+### Bug B — the display report rode a stale queue
+
+`set_tb_disp()` sent the display report through the iBridge's `usbhid` interrupt-OUT queue, which goes stale across hibernate (the report is silently dropped → dark bar), while `set_tb_mode()` used a direct control transfer that survives. Re-routing `set_tb_disp` through a synchronous `hid_hw_raw_request` fixed a `-32`/-EPIPE stall (visible even at cold boot). → [`disp-direct-usb.insert.c`](./disp-direct-usb.insert.c) · [`patch-and-build.sh`](./patch-and-build.sh).
+
+### The relight itself — rebuild the whole stack
+
+A successful display command *still* won't relight the firmware post-S4; nor will a USB re-enumerate or a bus reset (they reuse the stale `apple_ibridge` demux instance). Per a [survey of nine years of prior art](./POST-HIBERNATE-RELIGHT-INVESTIGATION.md), **nobody had relit a post-hibernate T1/T2 Touch Bar from Linux without a reboot** (macOS does it with a `DRLC` wake command over a config-2 bulk protocol Linux doesn't use). What *does* work is a **full reload of the `apple_ibridge` stack** — destroy and re-create the virtual HIDs and run a fresh `apple_touchbar` probe (the cold-boot light-up path):
+
+```sh
+modprobe -r apple_touchbar ; modprobe -r apple_ibridge ; modprobe apple_ibridge ; modprobe apple_touchbar
+```
+
+This is only **safe** once Bug A is fixed — before the fix, that exact `modprobe -r` is what hard-deadlocked the machine on hour one.
+
+### Deploy the automatic relight
+
+```sh
+# 1. apply both driver patches (DKMS), reboot
+cd touch-bar
+sudo ./patch-and-build.sh                 # Bug B (set_tb_disp)
+sudo ./patch-ibridge-teardown-and-build.sh # Bug A (the OOB — the important one)
+sudo reboot
+
+# 2. install the post-hibernate relight hook + reload helper
+sudo ./deploy-relight-reload.sh
+```
+
+The hook (`sleep-resume/51-touchbar-relight-hibernate.sh`) runs *only* on hibernate resume and schedules the reload **~5 s later, detached, in a time-bounded transient unit** (`RuntimeMaxSec=90`) — so even a stalled reload can never hang the resume path. The freeze path stays clean (the `50-` hook still skips hibernate). Verify:
+
+```sh
+sudo systemctl hibernate    # power-button to resume; bar relights ~5–8 s later
+journalctl -b 0 | grep -iE 'touchbar-relight|tb-relight-reload'
+```
+
+> **Minor caveat:** during the reload there's a brief `hid-generic` bind-race on the old-generation virtual HIDs (harmless — they're destroyed; `apple_touchbar` wins the fresh ones via HID rebind). If a resume ever comes back dark, re-run `/usr/local/sbin/touchbar-relight-reload`.
+
 ## Lessons
 
 - **Trust the contract, not the forum.** The fix came from reading `hid_add_device()` in the kernel source — not from stacking community workarounds for the wrong problem.
@@ -160,7 +210,13 @@ sudo dmesg | grep -iE 'oops|BUG|warning'  # expect none
 
 ## Upstream
 
-The gutted `appleib_ll_parse()` no-op appears in the `apple-ib-drv` forks (t2linux, AdityaGarg8). If you maintain one of those, this is worth fixing upstream so the next person with a T1 doesn't lose a weekend to it.
+Three things worth fixing in the `apple-ib-drv` forks (t2linux, AdityaGarg8) so the next T1 owner doesn't lose a weekend:
+
+1. **The gutted `appleib_ll_parse()` no-op** (round one) — a dark bar on every kernel.
+2. **The `appleib_add_device()` heap out-of-bounds write** (round two, [Bug A](#bug-a--a-heap-out-of-bounds-write-that-crashes-every-ibridge-teardown)) — the big one: it corrupts kernel memory on **every boot of every T1**, so *any* driver unload/teardown GPFs. This is a real, generic memory-safety bug, not hibernate-specific. The [analysis doc](./IBRIDGE-TEARDOWN-UAF-ANALYSIS.md) is essentially a ready-made bug report.
+3. **`set_tb_disp()` on a stale `usbhid` queue** ([Bug B](#bug-b--the-display-report-rode-a-stale-queue)) — a `-32` stall; the synchronous `hid_hw_raw_request` form is more robust.
+
+The post-hibernate **relight** (full stack reload) is a system-integration fix (a sleep hook), not a driver change — but the prior-art survey in [`POST-HIBERNATE-RELIGHT-INVESTIGATION.md`](./POST-HIBERNATE-RELIGHT-INVESTIGATION.md) suggests it may be the **first documented host-side T1 Touch Bar relight after hibernate**, so it's worth sharing with the t2linux/t1linux community regardless.
 
 ---
 

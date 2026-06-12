@@ -6,6 +6,14 @@
 
 This is a complete, self-contained spec + plan. It is written so an autonomous agent can execute it deterministically, with verification gates between phases and explicit guardrails that encode mistakes already paid for. Read the whole file before running anything.
 
+> **Scope note — this spec covers lighting the bar at boot.** Keeping it lit *across hibernate* is a separate, harder chapter with two more kernel bugs (a heap OOB in `apple_ibridge` + a `set_tb_disp` stall) and an automatic post-resume relight. If that's your goal, the authoritative artifacts are:
+> - [`IBRIDGE-TEARDOWN-UAF-ANALYSIS.md`](./IBRIDGE-TEARDOWN-UAF-ANALYSIS.md) — the heap-OOB root cause (proven), and [`POST-HIBERNATE-RELIGHT-INVESTIGATION.md`](./POST-HIBERNATE-RELIGHT-INVESTIGATION.md) — the firmware/prior-art survey.
+> - Patches: [`patch-and-build.sh`](./patch-and-build.sh) (disp) + [`patch-ibridge-teardown-and-build.sh`](./patch-ibridge-teardown-and-build.sh) (the OOB — apply this one regardless; it corrupts memory on *every* boot). Reverts alongside.
+> - Auto-relight: [`deploy-relight-reload.sh`](./deploy-relight-reload.sh) installs the post-hibernate hook.
+> - Narrative + how it was found (incl. the overnight agent that proved the OOB): [`THE-RELIGHT-HUNT.md`](./THE-RELIGHT-HUNT.md). README sequel: [`README.md#sequel`](./README.md#sequel--the-touch-bar-goes-dark-after-hibernate).
+>
+> **Hibernate-relight guardrail (paid for in ~8 reboots):** NEVER tear down the iBridge USB stack (`authorized` toggle, `modprobe -r`, unbind) until the `apple_ibridge` heap-OOB patch is applied — before that, any teardown D-state-deadlocks or GPFs the box and only a hard reboot recovers it. After the fix, a full stack reload is the relight; gate it on a **live-endpoint** `authorized` 0→1 (no hibernate) first.
+
 ---
 
 ## 0. Mission & definition of done
