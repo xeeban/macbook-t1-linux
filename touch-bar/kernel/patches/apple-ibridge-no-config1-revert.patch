@@ -1,0 +1,21 @@
+--- a/apple-ibridge.c	2026-06-12 12:53:41.652900125 -0700
++++ b/apple-ibridge.c	2026-06-12 12:53:41.674951543 -0700
+@@ -539,8 +539,16 @@
+ 	udev = hid_to_usb_dev(hdev);
+ 
+ 	if (udev->actconfig->desc.bConfigurationValue != APPLEIB_BASIC_CONFIG) {
+-		rc = usb_driver_set_configuration(udev, APPLEIB_BASIC_CONFIG);
+-		return rc ? rc : -ENODEV;
++		/*
++		 * T1 display mode (config 2, selected at enumeration time by
++		 * apple_dfr_cfgsel so appletbdrm can stream pixels): do NOT
++		 * force the device back to the basic config.  The async
++		 * usb_driver_set_configuration(udev, 1) issued here is what
++		 * knocked the device out of display mode ~45ms after every
++		 * userspace SET_CONFIGURATION(2).  Just decline this HID
++		 * device; hid-generic will handle the HID interfaces.
++		 */
++		return -ENODEV;
+ 	}
+ 
+ 	rc = hid_parse(hdev);

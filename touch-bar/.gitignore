@@ -1,0 +1,14 @@
+# compiled userspace spikes (build with the gcc line in each .c header)
+dfr-spike
+dfr-switch
+# kernel module build artifacts
+kernel/t1-touchbar-display/*.ko
+kernel/t1-touchbar-display/*.o
+kernel/t1-touchbar-display/*.mod
+kernel/t1-touchbar-display/*.mod.c
+kernel/t1-touchbar-display/*.mod.o
+kernel/t1-touchbar-display/.*.cmd
+kernel/t1-touchbar-display/modules.order
+kernel/t1-touchbar-display/Module.symvers
+# fetched upstream kernel sources used only for the root-cause analysis (not ours to vendor)
+kernel/ref/
