@@ -1,5 +1,25 @@
 # T1 Touch Bar — persistent install (survives reboot, zero manual steps)
 
+> **STATUS 2026-06-12 — reboot persistence partially working; one boot-ordering
+> bug remains.** Two flicker causes fixed and committed: USB autosuspend
+> (`-110` bulk timeout → `power/control=on` udev rule) and the firmware HID
+> drivers stealing the config-2 digitizer interface (→ `dfrd-blacklist.conf`
+> hard-blocks `apple_ibridge`/`apple_touchbar` with `install /bin/true`).
+> **Remaining:** on a cold boot the iBridge comes up **unconfigured**
+> (`bConfigurationValue` blank, no `appletbdrm` card) because `apple_dfr_cfgsel`
+> does a flaky *live* config switch when it loads after the device already
+> enumerated — instead of choosing config 2 on a *fresh* enumeration.
+> **Workaround / proof it's a race:** a clean re-enumerate makes it land config 2
+> reliably:
+> ```sh
+> echo 0 | sudo tee /sys/bus/usb/devices/1-3/authorized >/dev/null
+> echo 1 | sudo tee /sys/bus/usb/devices/1-3/authorized >/dev/null
+> sleep 3; cat /sys/bus/usb/devices/1-3/bConfigurationValue   # -> 2
+> sudo systemctl start dfrd.service
+> ```
+> The fix in progress is a boot-time oneshot that performs this re-enumerate if
+> the device isn't in config 2 once the modules are loaded.
+
 This packages the proven custom Touch Bar stack so it comes up automatically on
 every boot and after hibernate resume. Everything here is **packaging only** —
 the daemons (`dfr-render` / `dfr-touchd` / `dfr-fnd`) and kernel modules are
