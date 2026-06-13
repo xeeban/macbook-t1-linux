@@ -134,6 +134,11 @@ step "3/5  Install persistent udev rule (seat + SYMLINK + SYSTEMD_WANTS)"
 
 install -m0644 "$INSTALL_DIR/99-touchbar-dfr.rules" /etc/udev/rules.d/99-touchbar-dfr.rules
 echo "    -> /etc/udev/rules.d/99-touchbar-dfr.rules"
+# Blacklist the firmware-mode HID drivers: in display mode they claim the
+# config-2 digitizer interface and suppress its /dev/hidraw node, so dfr-touchd
+# can't read taps (the bar restart-loops/flickers). hid-generic must own it.
+install -m0644 "$INSTALL_DIR/dfrd-blacklist.conf" /etc/modprobe.d/dfrd-blacklist.conf
+echo "    -> /etc/modprobe.d/dfrd-blacklist.conf (block apple_ibridge/apple_touchbar)"
 echo "    udevadm control --reload"
 udevadm control --reload
 # Deliberately NOT triggering live: the card is already up under the OLD rule

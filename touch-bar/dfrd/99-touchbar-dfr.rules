@@ -39,6 +39,12 @@ ACTION=="add|change", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", \
   ENV{ID_SEAT}="seat-touchbar", TAG+="seat", TAG+="seat-touchbar", \
   TAG-="master-of-seat", TAG-="uaccess"
 
+# Keep the iBridge awake. USB autosuspend stalls appletbdrm's bulk frame send
+# with -110 (ETIMEDOUT) after the bar idles -> dfr-render crash-loops and the
+# bar flickers. Pin runtime PM to "on" for the 05ac:8600 device.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05ac", ATTR{idProduct}=="8600", \
+  ATTR{power/control}="on"
+
 # OPTIONAL (leave commented unless needed): if hid-generic turns the config-2
 # digitizer's non-standard reports into a garbage evdev input device that
 # libinput picks up (check `sudo libinput list-devices` while in config 2),

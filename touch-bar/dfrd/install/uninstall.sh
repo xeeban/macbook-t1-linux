@@ -58,9 +58,11 @@ rm -f /usr/local/bin/dfr-render /usr/local/bin/dfr-touchd \
 echo "    removed /usr/local/bin/{dfr-render,dfr-touchd,dfr-fnd,dfrd-run.sh}"
 
 # ----------------------------------------------------------------------------
-step "3/5  Remove udev rule"
+step "3/5  Remove udev rule + module blacklist"
 rm -f /etc/udev/rules.d/99-touchbar-dfr.rules
 echo "    removed /etc/udev/rules.d/99-touchbar-dfr.rules"
+rm -f /etc/modprobe.d/dfrd-blacklist.conf
+echo "    removed /etc/modprobe.d/dfrd-blacklist.conf (apple_ibridge/apple_touchbar load again)"
 udevadm control --reload
 
 # ----------------------------------------------------------------------------
