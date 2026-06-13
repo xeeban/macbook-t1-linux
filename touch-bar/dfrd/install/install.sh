@@ -153,16 +153,20 @@ install -m0755 "$DFRD_DIR/dfr-render"  /usr/local/bin/dfr-render
 install -m0755 "$DFRD_DIR/dfr-touchd"  /usr/local/bin/dfr-touchd
 install -m0755 "$DFRD_DIR/dfr-fnd"     /usr/local/bin/dfr-fnd
 install -m0755 "$DFRD_DIR/dfrd-run.sh" /usr/local/bin/dfrd-run.sh
-echo "    -> /usr/local/bin/{dfr-render,dfr-touchd,dfr-fnd,dfrd-run.sh}"
+install -m0755 "$INSTALL_DIR/dfrd-ensure-config2.sh" /usr/local/bin/dfrd-ensure-config2.sh
+echo "    -> /usr/local/bin/{dfr-render,dfr-touchd,dfr-fnd,dfrd-run.sh,dfrd-ensure-config2.sh}"
 echo "    (dfrd-run.sh resolves siblings by its own dir, so all four co-locate)"
 
 # ----------------------------------------------------------------------------
 step "5/5  Install + enable dfrd.service"
 
-install -m0644 "$INSTALL_DIR/dfrd.service" /etc/systemd/system/dfrd.service
-echo "    -> /etc/systemd/system/dfrd.service"
+install -m0644 "$INSTALL_DIR/dfrd.service"        /etc/systemd/system/dfrd.service
+install -m0644 "$INSTALL_DIR/dfrd-cfgsel.service" /etc/systemd/system/dfrd-cfgsel.service
+echo "    -> /etc/systemd/system/{dfrd.service,dfrd-cfgsel.service}"
 echo "    systemctl daemon-reload"
 systemctl daemon-reload
+echo "    systemctl enable dfrd-cfgsel.service (ensures config 2 at boot)"
+systemctl enable dfrd-cfgsel.service
 echo "    systemctl enable dfrd.service (belt-and-suspenders; SYSTEMD_WANTS is primary)"
 systemctl enable dfrd.service
 

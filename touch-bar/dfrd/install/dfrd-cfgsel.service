@@ -1,0 +1,18 @@
+# dfrd-cfgsel.service — ensure the T1 iBridge lands USB config 2 (display mode)
+# at boot, working around apple_dfr_cfgsel's load-ordering race (a cold boot can
+# leave the device unconfigured; a fresh re-enumerate with cfgsel loaded fixes
+# it). Once config 2 holds, the appletbdrm card appears and the udev rule's
+# SYSTEMD_WANTS pulls in dfrd.service. Installed + enabled by install.sh.
+[Unit]
+Description=Ensure T1 iBridge Touch Bar is in display mode (config 2)
+After=systemd-udevd.service local-fs.target
+Wants=systemd-udevd.service
+Before=dfrd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/dfrd-ensure-config2.sh
+
+[Install]
+WantedBy=multi-user.target

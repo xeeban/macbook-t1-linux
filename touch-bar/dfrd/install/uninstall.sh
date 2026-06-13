@@ -40,7 +40,7 @@ fi
 
 # ----------------------------------------------------------------------------
 step "1/5  Stop + remove systemd unit(s)"
-for u in dfrd.service dfr-render.service dfr-touchd.service; do
+for u in dfrd.service dfrd-cfgsel.service dfr-render.service dfr-touchd.service; do
     if systemctl list-unit-files "$u" >/dev/null 2>&1 && \
        [ -e "/etc/systemd/system/$u" ]; then
         echo "    stop/disable/remove $u"
@@ -54,8 +54,9 @@ systemctl daemon-reload
 # ----------------------------------------------------------------------------
 step "2/5  Remove userspace binaries"
 rm -f /usr/local/bin/dfr-render /usr/local/bin/dfr-touchd \
-      /usr/local/bin/dfr-fnd    /usr/local/bin/dfrd-run.sh
-echo "    removed /usr/local/bin/{dfr-render,dfr-touchd,dfr-fnd,dfrd-run.sh}"
+      /usr/local/bin/dfr-fnd    /usr/local/bin/dfrd-run.sh \
+      /usr/local/bin/dfrd-ensure-config2.sh
+echo "    removed /usr/local/bin/{dfr-render,dfr-touchd,dfr-fnd,dfrd-run.sh,dfrd-ensure-config2.sh}"
 
 # ----------------------------------------------------------------------------
 step "3/5  Remove udev rule + module blacklist"
