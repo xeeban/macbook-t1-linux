@@ -4,6 +4,7 @@ dfr-switch
 # compiled dfrd stack (build with `make` in dfrd/)
 dfrd/dfr-render
 dfrd/dfr-touchd
+dfrd/dfr-fnd
 dfrd/*.o
 *.ppm
 # kernel module build artifacts

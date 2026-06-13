@@ -48,9 +48,10 @@
 #define FALLBACK_IFACE  6     /* second config-2 HID interface (EP 0x87) */
 #define RELEASE_MS 150        /* no report for this long => finger up */
 
-static volatile sig_atomic_t g_stop, g_cycle;
+static volatile sig_atomic_t g_stop, g_cycle, g_setlayout = -1;
 static void on_stop(int s) { (void)s; g_stop = 1; }
 static void on_usr1(int s) { (void)s; g_cycle = 1; }
+static void on_rt(int s)   { g_setlayout = s - SIGRTMIN; }  /* SIGRTMIN+i -> set layout i */
 
 /* ------------------------------------------------------------------ */
 /* sysfs helpers                                                       */
@@ -242,6 +243,8 @@ int main(int argc, char **argv)
 	signal(SIGINT, on_stop);
 	signal(SIGTERM, on_stop);
 	signal(SIGUSR1, on_usr1);
+	for (int i = 0; i < DFR_NLAYOUTS && SIGRTMIN + i <= SIGRTMAX; i++)
+		signal(SIGRTMIN + i, on_rt);
 
 	char dev[64];
 	if (dev_override)
@@ -279,14 +282,21 @@ int main(int argc, char **argv)
 	while (!g_stop) {
 		if (g_cycle) {
 			g_cycle = 0;
-			if (down) {           /* don't leave a key stuck across swap */
-				if (!dry_run) key_up(down_key);
-				down = 0;
+			g_setlayout = (layout_idx + 1) % DFR_NLAYOUTS;
+		}
+		if (g_setlayout >= 0) {
+			int idx = g_setlayout;
+			g_setlayout = -1;
+			if (idx < DFR_NLAYOUTS && idx != layout_idx) {
+				if (down) {           /* don't leave a key stuck across swap */
+					if (!dry_run) key_up(down_key);
+					down = 0;
+				}
+				layout_idx = idx;
+				layout = &dfr_layouts[layout_idx];
+				printf("set layout '%s'\n", layout->name);
+				fflush(stdout);
 			}
-			layout_idx = (layout_idx + 1) % DFR_NLAYOUTS;
-			layout = &dfr_layouts[layout_idx];
-			printf("switched to layout '%s'\n", layout->name);
-			fflush(stdout);
 		}
 
 		struct pollfd pfd = { .fd = fd, .events = POLLIN };

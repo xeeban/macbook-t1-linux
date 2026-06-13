@@ -51,9 +51,10 @@
 #define COL_TXT 0xFFE8E8E8u
 #define COL_ESC 0xFF3A2E2Eu   /* slightly warm tint so ESC is findable by feel */
 
-static volatile sig_atomic_t g_stop, g_cycle;
+static volatile sig_atomic_t g_stop, g_cycle, g_setlayout = -1;
 static void on_stop(int s)  { (void)s; g_stop = 1; }
 static void on_usr1(int s)  { (void)s; g_cycle = 1; }
+static void on_rt(int s)    { g_setlayout = s - SIGRTMIN; }  /* SIGRTMIN+i -> set layout i */
 
 /* ------------------------------------------------------------------ */
 /* 5x7 bitmap font: rows top->bottom, bit 4 = leftmost column           */
@@ -307,6 +308,8 @@ int main(int argc, char **argv)
 	signal(SIGINT, on_stop);
 	signal(SIGTERM, on_stop);
 	signal(SIGUSR1, on_usr1);
+	for (int i = 0; i < DFR_NLAYOUTS && SIGRTMIN + i <= SIGRTMAX; i++)
+		signal(SIGRTMIN + i, on_rt);
 
 	char card_path[64] = "";
 	int fd = open_card(card_override, card_path, sizeof card_path);
@@ -454,14 +457,21 @@ int main(int argc, char **argv)
 	while (!g_stop) {
 		if (g_cycle) {
 			g_cycle = 0;
-			layout_idx = (layout_idx + 1) % DFR_NLAYOUTS;
-			layout = &dfr_layouts[layout_idx];
-			draw_layout(layout);
-			drmModeDirtyFB(fd, fb_id, NULL, 0);
-			printf("switched to layout '%s'\n", layout->name);
-			fflush(stdout);
+			g_setlayout = (layout_idx + 1) % DFR_NLAYOUTS;
 		}
-		pause();
+		if (g_setlayout >= 0) {
+			int idx = g_setlayout;
+			g_setlayout = -1;
+			if (idx < DFR_NLAYOUTS && idx != layout_idx) {
+				layout_idx = idx;
+				layout = &dfr_layouts[layout_idx];
+				draw_layout(layout);
+				drmModeDirtyFB(fd, fb_id, NULL, 0);
+				printf("set layout '%s'\n", layout->name);
+				fflush(stdout);
+			}
+		}
+		usleep(30000);
 	}
 
 	/* teardown */

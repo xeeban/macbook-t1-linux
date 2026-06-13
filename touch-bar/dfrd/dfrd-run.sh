@@ -16,7 +16,7 @@
 
 set -u
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LAYOUT="${1:-fn}"
+LAYOUT="${1:-media}"   # macOS-style: control strip by default, Fn for F-keys
 shift 2>/dev/null || true
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -53,9 +53,10 @@ if [ "$seat" != "seat-touchbar" ]; then
 fi
 
 # --- launch --------------------------------------------------------------
-RPID="" TPID=""
+RPID="" TPID="" FPID=""
 cleanup() {
     trap - EXIT INT TERM
+    [ -n "$FPID" ] && kill "$FPID" 2>/dev/null
     [ -n "$TPID" ] && kill "$TPID" 2>/dev/null
     [ -n "$RPID" ] && kill "$RPID" 2>/dev/null
     wait 2>/dev/null
@@ -83,7 +84,17 @@ if ! kill -0 "$TPID" 2>/dev/null; then
     exit 1
 fi
 
-echo "dfrd: up. renderer pid $RPID, touchd pid $TPID. Ctrl-C to stop."
-echo "dfrd: cycle layouts with: sudo kill -USR1 $RPID $TPID"
+# Fn-layer switcher: media default, Fn (and Ctrl/Alt/Cmd+Fn) momentarily switch layers
+echo "dfrd: starting Fn-layer watcher..."
+"$DIR/dfr-fnd" "$RPID" "$TPID" &
+FPID=$!
+sleep 1
+if ! kill -0 "$FPID" 2>/dev/null; then
+    echo "WARNING: dfr-fnd exited (no keyboard? Fn-switching disabled, bar still works)" >&2
+    FPID=""
+fi
+
+echo "dfrd: up. render=$RPID touchd=$TPID fnd=${FPID:-none}. Ctrl-C to stop."
+echo "dfrd: default 'media' strip; HOLD Fn for F-keys (Ctrl/Alt/Cmd+Fn = extra layers once defined)."
 wait -n
 echo "dfrd: a daemon exited — tearing down." >&2

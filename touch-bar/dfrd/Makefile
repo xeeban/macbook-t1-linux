@@ -4,7 +4,7 @@ CFLAGS  ?= -O2 -Wall -Wextra
 DRM_CFLAGS := $(shell pkg-config --cflags libdrm 2>/dev/null || echo -I/usr/include/libdrm)
 DRM_LIBS   := $(shell pkg-config --libs   libdrm 2>/dev/null || echo -ldrm)
 
-all: dfr-render dfr-touchd
+all: dfr-render dfr-touchd dfr-fnd
 
 dfr-render: dfr-render.c dfr-layout.h
 	$(CC) $(CFLAGS) $(DRM_CFLAGS) -o $@ dfr-render.c $(DRM_LIBS)
@@ -12,7 +12,10 @@ dfr-render: dfr-render.c dfr-layout.h
 dfr-touchd: dfr-touchd.c dfr-layout.h
 	$(CC) $(CFLAGS) -o $@ dfr-touchd.c
 
+dfr-fnd: dfr-fnd.c dfr-layout.h
+	$(CC) $(CFLAGS) -o $@ dfr-fnd.c
+
 clean:
-	rm -f dfr-render dfr-touchd
+	rm -f dfr-render dfr-touchd dfr-fnd
 
 .PHONY: all clean
