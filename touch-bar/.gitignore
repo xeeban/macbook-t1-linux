@@ -1,6 +1,11 @@
 # compiled userspace spikes (build with the gcc line in each .c header)
 dfr-spike
 dfr-switch
+# compiled dfrd stack (build with `make` in dfrd/)
+dfrd/dfr-render
+dfrd/dfr-touchd
+dfrd/*.o
+*.ppm
 # kernel module build artifacts
 kernel/t1-touchbar-display/*.ko
 kernel/t1-touchbar-display/*.o

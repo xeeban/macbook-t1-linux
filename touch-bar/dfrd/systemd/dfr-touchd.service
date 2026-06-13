@@ -1,0 +1,14 @@
+# DRAFT — see ../PERSISTENCE-AND-ROADMAP.md before enabling.
+[Unit]
+Description=T1 Touch Bar touch daemon (dfr-touchd)
+BindsTo=dev-dri-touchbar.device
+After=dev-dri-touchbar.device dfr-render.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dfr-touchd -l fn
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

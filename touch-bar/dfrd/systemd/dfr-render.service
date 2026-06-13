@@ -1,0 +1,18 @@
+# DRAFT — see ../PERSISTENCE-AND-ROADMAP.md before enabling.
+# Requires: binaries installed to /usr/local/bin, modules DKMS-persistent,
+# 99-touchbar-dfr.rules installed (else this fails forever against mutter).
+[Unit]
+Description=T1 Touch Bar renderer (dfr-render)
+# Started by udev when the appletbdrm card appears (SYSTEMD_WANTS, see notes);
+# the device unit dependency keeps it from racing module load at boot.
+BindsTo=dev-dri-touchbar.device
+After=dev-dri-touchbar.device
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dfr-render -l fn
+Restart=on-failure
+RestartSec=2
+# resume quirk headroom: after S4 the card re-probes; Restart picks us back up
+[Install]
+WantedBy=multi-user.target
