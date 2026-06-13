@@ -1,24 +1,25 @@
 # T1 Touch Bar — persistent install (survives reboot, zero manual steps)
 
-> **STATUS 2026-06-12 — reboot persistence partially working; one boot-ordering
-> bug remains.** Two flicker causes fixed and committed: USB autosuspend
-> (`-110` bulk timeout → `power/control=on` udev rule) and the firmware HID
-> drivers stealing the config-2 digitizer interface (→ `dfrd-blacklist.conf`
-> hard-blocks `apple_ibridge`/`apple_touchbar` with `install /bin/true`).
-> **Remaining:** on a cold boot the iBridge comes up **unconfigured**
-> (`bConfigurationValue` blank, no `appletbdrm` card) because `apple_dfr_cfgsel`
-> does a flaky *live* config switch when it loads after the device already
-> enumerated — instead of choosing config 2 on a *fresh* enumeration.
-> **Workaround / proof it's a race:** a clean re-enumerate makes it land config 2
-> reliably:
-> ```sh
-> echo 0 | sudo tee /sys/bus/usb/devices/1-3/authorized >/dev/null
-> echo 1 | sudo tee /sys/bus/usb/devices/1-3/authorized >/dev/null
-> sleep 3; cat /sys/bus/usb/devices/1-3/bConfigurationValue   # -> 2
-> sudo systemctl start dfrd.service
-> ```
-> The fix in progress is a boot-time oneshot that performs this re-enumerate if
-> the device isn't in config 2 once the modules are loaded.
+> **STATUS 2026-06-12 — reboot persistence WORKING. Validated on a cold boot:
+> the bar comes up lit with the media strip, zero manual steps.** Three
+> gremlins, all fixed + committed:
+> 1. **USB autosuspend** stalled the appletbdrm bulk send (`-110` timeout) →
+>    `power/control=on` for `05ac:8600` in the udev rules.
+> 2. **Firmware HID drivers stole the config-2 digitizer interface** (no
+>    `/dev/hidraw` → `dfr-touchd` failed → flicker) → `dfrd-blacklist.conf`
+>    hard-blocks `apple_ibridge`/`apple_touchbar` with `install /bin/true`
+>    (plain `blacklist` only suppresses a module's own aliases — wasn't enough).
+> 3. **Unconfigured at cold boot** — `apple_dfr_cfgsel` does a flaky *live*
+>    config switch when it autoloads *after* the device enumerated, leaving
+>    `bConfigurationValue` blank and no `appletbdrm` card. A *fresh* re-enumerate
+>    with cfgsel already loaded lands config 2 reliably → `dfrd-cfgsel.service`
+>    (oneshot, `Before=dfrd.service`) runs `dfrd-ensure-config2.sh` at boot:
+>    modprobe the modules, then `authorized` 0→1 if not config 2. The card then
+>    appears and the udev `SYSTEMD_WANTS` pulls in `dfrd.service`.
+>
+> Follow-up (untested): the same re-enumerate may be needed after hibernate
+> resume — the `51-` hook restarts `dfrd.service`, but if resume also leaves the
+> device unconfigured, point the hook at `dfrd-ensure-config2.sh` too.
 
 This packages the proven custom Touch Bar stack so it comes up automatically on
 every boot and after hibernate resume. Everything here is **packaging only** —
