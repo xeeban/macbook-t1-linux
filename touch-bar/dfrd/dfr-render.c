@@ -342,6 +342,7 @@ static int utf8_enc(uint32_t cp, char *buf)
 
 /* one cached label per indicator type; empty string = use static fallback */
 static char g_ind_label[5][64];
+static uint32_t g_ind_color[5];   /* dynamic tint per indicator (0 = default) */
 
 static void ind_compose_battery(char *out, size_t n)
 {
@@ -353,14 +354,21 @@ static void ind_compose_battery(char *out, size_t n)
 		return;
 	}
 	uint32_t icon;
-	if (!strncmp(status, "Charging", 8))
+	if (!strncmp(status, "Charging", 8)) {
 		icon = 0xF0084;                       /* nf-md-battery_charging */
-	else if (cap >= 95)
-		icon = 0xF0079;                       /* nf-md-battery (full) */
-	else if (cap >= 10)
-		icon = 0xF007A + (uint32_t)(cap / 10 - 1);  /* battery_10..90 */
-	else
-		icon = 0xF008E;                       /* nf-md-battery_outline */
+		g_ind_color[DFR_IND_BATTERY] = 0xFF40D0FFu;         /* cyan */
+	} else {
+		if (cap >= 95)
+			icon = 0xF0079;               /* nf-md-battery (full) */
+		else if (cap >= 10)
+			icon = 0xF007A + (uint32_t)(cap / 10 - 1);  /* 10..90 */
+		else
+			icon = 0xF008E;               /* nf-md-battery_outline */
+		g_ind_color[DFR_IND_BATTERY] =
+			cap <= 15 ? 0xFFEF5350u :     /* red   */
+			cap <= 40 ? 0xFFFFC107u :     /* amber */
+				    0xFF66BB6Au;      /* green */
+	}
 	char g[8];
 	utf8_enc(icon, g);
 	snprintf(out, n, "%s %d%%", g, cap);
@@ -376,6 +384,7 @@ static void ind_compose_kbdlight(char *out, size_t n)
 	}
 	char g[8];
 	utf8_enc(0xF030C, g);                         /* nf-md-keyboard */
+	g_ind_color[DFR_IND_KBDLIGHT] = 0xFFFFC107u;  /* amber */
 	snprintf(out, n, "%s %d%%", g, (cur * 100 + max / 2) / max);
 }
 
@@ -390,12 +399,15 @@ static void ind_compose_wifi(char *out, size_t n)
 	uint32_t icon;
 	if (strcmp(line, "enabled") != 0) {
 		icon = 0xF05AA;                       /* nf-md-wifi_off */
+		g_ind_color[DFR_IND_WIFI] = 0xFF707070u;            /* gray (off) */
 	} else if (run_cmd_line("timeout 1 nmcli -t -f TYPE,STATE device status 2>/dev/null"
 				" | grep -m1 '^wifi:connected'",
 				line, sizeof line) == 0) {
 		icon = 0xF05A9;                       /* nf-md-wifi (connected) */
+		g_ind_color[DFR_IND_WIFI] = 0xFF66BB6Au;            /* green */
 	} else {
 		icon = 0xF092E;                       /* nf-md-wifi_strength_outline */
+		g_ind_color[DFR_IND_WIFI] = 0xFFB0BEC5u;            /* dim (on, no link) */
 	}
 	char g[8];
 	utf8_enc(icon, g);
@@ -418,7 +430,13 @@ static void ind_compose_bt(char *out, size_t n)
 		read_file_int(p, &soft);
 		snprintf(p, sizeof p, "/sys/class/rfkill/rfkill%d/hard", i);
 		read_file_int(p, &hard);
-		icon = (soft || hard) ? 0xF00B2 : 0xF00AF;  /* bluetooth_off : bluetooth */
+		if (soft || hard) {
+			icon = 0xF00B2;               /* bluetooth_off */
+			g_ind_color[DFR_IND_BT] = 0xFF707070u;      /* gray */
+		} else {
+			icon = 0xF00AF;               /* bluetooth */
+			g_ind_color[DFR_IND_BT] = 0xFF5C9DFFu;      /* blue */
+		}
 		break;
 	}
 	if (!icon) {
@@ -467,7 +485,13 @@ static void draw_layout(const struct dfr_layout *l)
 			       l->keys[i].keycode == KEY_ESC) ? COL_ESC : COL_BTN;
 		fill_phys(x0 + 3, 6, bw, g_short - 12, bc);
 
-		const char *label = key_label(&l->keys[i]);
+		const struct dfr_key *k = &l->keys[i];
+		const char *label = key_label(k);
+		uint32_t tcol = COL_TXT;
+		if (k->indicator > DFR_IND_NONE && k->indicator < 5 && g_ind_color[k->indicator])
+			tcol = g_ind_color[k->indicator];
+		else if (k->color)
+			tcol = k->color;
 
 		/* biggest size that fits width and bar height */
 		int px = FONT_PX_MAX, asc, box, tw;
@@ -480,7 +504,7 @@ static void draw_layout(const struct dfr_layout *l)
 		}
 		int tx = x0 + 3 + (bw - tw) / 2;
 		int baseline = (g_short - box) / 2 + asc;
-		draw_text_ft(tx, baseline, label, px, COL_TXT);
+		draw_text_ft(tx, baseline, label, px, tcol);
 	}
 }
 

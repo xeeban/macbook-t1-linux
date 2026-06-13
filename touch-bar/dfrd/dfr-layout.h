@@ -57,6 +57,7 @@ struct dfr_key {
 	int action;          /* enum dfr_action (0 = DFR_ACT_KEY) */
 	const char *cmd;     /* DFR_ACT_CMD: /bin/sh -c "<cmd>" as the user */
 	int indicator;       /* enum dfr_indicator (0 = static label) */
+	unsigned color;      /* 0xAARRGGBB tint for label/icon; 0 = default (white) */
 };
 
 struct dfr_layout {
@@ -94,6 +95,16 @@ struct dfr_layout {
 #define DFR_GLYPH_MUTE      "\U000F075F"
 #define DFR_GLYPH_VOLDOWN   "\U000F075E"
 #define DFR_GLYPH_VOLUP     "\U000F075D"
+#define DFR_GLYPH_BRDOWN    "\U000F00DE"   /* nf-md-brightness_5 (dim sun)  */
+#define DFR_GLYPH_BRUP      "\U000F00E0"   /* nf-md-brightness_7 (full sun) */
+
+/* icon tints (0xAARRGGBB) */
+#define DFR_COL_BRIGHT 0xFFFFC107u  /* amber       */
+#define DFR_COL_SKIP   0xFF64B5F6u  /* light blue  */
+#define DFR_COL_PLAY   0xFF66BB6Au  /* green       */
+#define DFR_COL_STOP   0xFFEF5350u  /* red         */
+#define DFR_COL_MUTE   0xFFFF7043u  /* orange      */
+#define DFR_COL_VOL    0xFF42A5F5u  /* blue        */
 
 /* ------------------------------------------------------------------ */
 /* Layouts (data-driven: edit here, both daemons pick it up on rebuild) */
@@ -116,15 +127,15 @@ static const struct dfr_key dfr_keys_fn[] = {
 };
 
 static const struct dfr_key dfr_keys_media[] = {
-	{ "ESC",  KEY_ESC,            1.4f, 0, 0, 0 },
-	{ "BR-",  KEY_BRIGHTNESSDOWN, 1.0f, 0, 0, 0 },
-	{ "BR+",  KEY_BRIGHTNESSUP,   1.0f, 0, 0, 0 },
-	{ "<<",   KEY_PREVIOUSSONG,   1.0f, 0, 0, 0 },
-	{ ">|",   KEY_PLAYPAUSE,      1.0f, 0, 0, 0 },
-	{ ">>",   KEY_NEXTSONG,       1.0f, 0, 0, 0 },
-	{ "MUTE", KEY_MUTE,           1.0f, 0, 0, 0 },
-	{ "VOL-", KEY_VOLUMEDOWN,     1.0f, 0, 0, 0 },
-	{ "VOL+", KEY_VOLUMEUP,       1.0f, 0, 0, 0 },
+	{ "ESC",             KEY_ESC,            1.4f, 0, 0, 0, 0 },
+	{ DFR_GLYPH_BRDOWN,  KEY_BRIGHTNESSDOWN, 1.0f, 0, 0, 0, DFR_COL_BRIGHT },
+	{ DFR_GLYPH_BRUP,    KEY_BRIGHTNESSUP,   1.0f, 0, 0, 0, DFR_COL_BRIGHT },
+	{ DFR_GLYPH_PREV,    KEY_PREVIOUSSONG,   1.0f, 0, 0, 0, DFR_COL_SKIP   },
+	{ DFR_GLYPH_PLAYPAUSE, KEY_PLAYPAUSE,    1.0f, 0, 0, 0, DFR_COL_PLAY   },
+	{ DFR_GLYPH_NEXT,    KEY_NEXTSONG,       1.0f, 0, 0, 0, DFR_COL_SKIP   },
+	{ DFR_GLYPH_MUTE,    KEY_MUTE,           1.0f, 0, 0, 0, DFR_COL_MUTE   },
+	{ DFR_GLYPH_VOLDOWN, KEY_VOLUMEDOWN,     1.0f, 0, 0, 0, DFR_COL_VOL    },
+	{ DFR_GLYPH_VOLUP,   KEY_VOLUMEUP,       1.0f, 0, 0, 0, DFR_COL_VOL    },
 };
 
 /* alt (Opt+Fn): GNOME-assignable extended function keys */
@@ -146,13 +157,13 @@ static const struct dfr_key dfr_keys_alt[] = {
 /* meta (Cmd+Fn): media transport with Nerd Font glyphs — for when the
  * focused app overrides the default media strip */
 static const struct dfr_key dfr_keys_meta[] = {
-	{ DFR_GLYPH_PREV,      KEY_PREVIOUSSONG, 1.0f, 0, 0, 0 },
-	{ DFR_GLYPH_PLAYPAUSE, KEY_PLAYPAUSE,    1.0f, 0, 0, 0 },
-	{ DFR_GLYPH_NEXT,      KEY_NEXTSONG,     1.0f, 0, 0, 0 },
-	{ DFR_GLYPH_STOP,      KEY_STOPCD,       1.0f, 0, 0, 0 },
-	{ DFR_GLYPH_MUTE,      KEY_MUTE,         1.0f, 0, 0, 0 },
-	{ DFR_GLYPH_VOLDOWN,   KEY_VOLUMEDOWN,   1.0f, 0, 0, 0 },
-	{ DFR_GLYPH_VOLUP,     KEY_VOLUMEUP,     1.0f, 0, 0, 0 },
+	{ DFR_GLYPH_PREV,      KEY_PREVIOUSSONG, 1.0f, 0, 0, 0, DFR_COL_SKIP },
+	{ DFR_GLYPH_PLAYPAUSE, KEY_PLAYPAUSE,    1.0f, 0, 0, 0, DFR_COL_PLAY },
+	{ DFR_GLYPH_NEXT,      KEY_NEXTSONG,     1.0f, 0, 0, 0, DFR_COL_SKIP },
+	{ DFR_GLYPH_STOP,      KEY_STOPCD,       1.0f, 0, 0, 0, DFR_COL_STOP },
+	{ DFR_GLYPH_MUTE,      KEY_MUTE,         1.0f, 0, 0, 0, DFR_COL_MUTE },
+	{ DFR_GLYPH_VOLDOWN,   KEY_VOLUMEDOWN,   1.0f, 0, 0, 0, DFR_COL_VOL  },
+	{ DFR_GLYPH_VOLUP,     KEY_VOLUMEUP,     1.0f, 0, 0, 0, DFR_COL_VOL  },
 };
 
 /* ctrl (Ctrl+Fn): SYSTEM row — live indicators; tap opens the matching

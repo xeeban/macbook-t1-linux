@@ -1,6 +1,6 @@
 # dfrd — T1 Touch Bar userspace stack (renderer + touch daemon)
 CC      ?= gcc
-CFLAGS  ?= -O2 -Wall -Wextra
+CFLAGS  ?= -O2 -Wall -Wextra -Wno-missing-field-initializers
 DRM_CFLAGS := $(shell pkg-config --cflags libdrm 2>/dev/null || echo -I/usr/include/libdrm)
 DRM_LIBS   := $(shell pkg-config --libs   libdrm 2>/dev/null || echo -ldrm)
 FT_CFLAGS  := $(shell pkg-config --cflags freetype2 fontconfig)
