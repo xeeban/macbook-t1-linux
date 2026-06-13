@@ -1,0 +1,55 @@
+# dfrd.service — T1 Touch Bar userspace stack (renderer + touch daemon + Fn watcher)
+#
+# Single unit, on purpose: dfrd-run.sh already orchestrates all three daemons
+# (dfr-render, dfr-touchd, dfr-fnd) in one process group with clean teardown and
+# the Fn-layer wiring. One unit = one lifecycle bound to the DRM card, with no
+# inter-daemon ordering races.
+#
+# START/STOP is driven by the udev rule (install/99-touchbar-dfr.rules):
+#   - The rule SYMLINKs the appletbdrm card to /dev/dri/touchbar and tags it for
+#     systemd, so systemd exposes it as dev-dri-touchbar.device.
+#   - ENV{SYSTEMD_WANTS}+="dfrd.service" pulls this unit in every time the card
+#     is added/changed: at boot when the DKMS modules autoload, AND after the
+#     post-hibernate / module-reload re-enumeration. No [Install]/`enable`
+#     needed for the start path — but we keep WantedBy as a belt-and-suspenders
+#     fallback (harmless: BindsTo gates actual start on the device existing).
+#
+# SURVIVES the card disappearing/reappearing:
+#   - BindsTo=dev-dri-touchbar.device stops dfrd the instant the card vanishes
+#     (suspend teardown, rmmod) instead of leaving daemons spinning on a dead
+#     card; SYSTEMD_WANTS then restarts it on the re-add.
+#   - Restart=always + RestartSec covers crashes and the brief window where the
+#     card re-probes during hibernate resume.
+
+[Unit]
+Description=T1 Touch Bar stack (dfr-render + dfr-touchd + dfr-fnd)
+Documentation=file:///home/nnishigaya/Code/xeeban/macbook-t1-linux/touch-bar/dfrd/install/PERSISTENCE.md
+BindsTo=dev-dri-touchbar.device
+After=dev-dri-touchbar.device
+# NB: we deliberately do NOT pull in systemd-udev-settle.service (deprecated,
+# can stall boot). BindsTo/After=dev-dri-touchbar.device already gates start on
+# the card existing; ExecStartPre below covers the HID-node lag.
+# If the card flaps fast (resume churn), don't let systemd give up on restarts.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# dfrd-run.sh runs all three daemons in one process group, waits, and tears
+# them down on exit. Default layout: media (macOS-style control strip).
+ExecStart=/usr/local/bin/dfrd-run.sh media
+# The card's HID interfaces probe slightly after the AV interface, so the
+# digitizer hidraw node can lag the DRM card by a beat. A short settle avoids
+# dfr-touchd losing the race on a cold start; dfrd-run.sh also re-checks.
+ExecStartPre=/usr/bin/sleep 1
+Restart=always
+RestartSec=2
+# Root: needs DRM master on the appletbdrm card + /dev/hidraw* + /dev/uinput.
+# (dfr-touchd drops to the desktop user itself for the settings-launch.)
+User=root
+# Make the renderer pick the right user session for command-launch even before
+# a login exists (no-ops cleanly until the user logs in).
+Environment=DFR_UID=1000
+Environment=DFR_USER=nnishigaya
+
+[Install]
+WantedBy=multi-user.target

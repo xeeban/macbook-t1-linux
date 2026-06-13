@@ -1,4 +1,5 @@
-# DRAFT — see ../PERSISTENCE-AND-ROADMAP.md before enabling.
+# SUPERSEDED by ../install/dfrd.service (single unit, see dfr-render.service note).
+# DRAFT — see ../PERSISTENCE-AND-ROADMAP.md.
 [Unit]
 Description=T1 Touch Bar touch daemon (dfr-touchd)
 BindsTo=dev-dri-touchbar.device

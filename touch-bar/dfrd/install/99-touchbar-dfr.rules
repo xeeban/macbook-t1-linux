@@ -1,0 +1,53 @@
+# 99-touchbar-dfr.rules (PERSISTENT variant) — keep GNOME/mutter's hands OFF
+# the T1 Touch Bar DRM card, AND wire it into systemd so dfrd.service starts
+# automatically whenever the appletbdrm card (re)appears.
+#
+# This is the install/ superset of ../99-touchbar-dfr.rules. It adds, on the
+# same DRM-card match line:
+#   SYMLINK+="dri/touchbar"   -> stable /dev/dri/touchbar (card number varies)
+#   TAG+="systemd"            -> systemd materialises dev-dri-touchbar.device
+#   ENV{SYSTEMD_WANTS}+=...   -> pull in dfrd.service on every card add/change
+# so the daemons start at boot AND restart after the post-hibernate re-probe
+# (no separate resume hook needed for the renderer).
+#
+# SEAT MECHANISM (unchanged from the base rule):
+#   systemd's 71-seat.rules tags every drm card seat/master-of-seat; logind
+#   files the device under the seat named in ID_SEAT (default seat0). mutter's
+#   native backend only opens cards whose ID_SEAT matches its session seat
+#   (seat0), at startup AND on hotplug. Re-pointing ID_SEAT at a dummy
+#   "seat-touchbar" (no sessions) makes mutter skip the card, leaving DRM
+#   master free for dfr-render.
+#   - Runs at 99-, AFTER 71-seat.rules / 73-seat-late.rules. We add
+#     TAG+="seat-touchbar" to mirror what 73-seat-late would have done.
+#   - TAG-="master-of-seat" so logind won't treat the dummy seat as graphics
+#     capable; TAG-="uaccess" since no session sits on it (dfrd runs as root).
+#   - ATTRS{} walks up to the USB device 05ac:8600 (iBridge). The Intel GPU
+#     (PCI 8086) has no such USB parent and is untouched.
+#
+# ORDERING CAVEAT
+#   The rule applies when the card's add/change uevent fires. mutter does NOT
+#   release a card it already opened, so the rule must be in effect BEFORE the
+#   appletbdrm card is created. With DKMS modalias autoload at boot the rule is
+#   already in /etc when the card appears — automatic. If you reload the
+#   modules by hand while the rule is freshly installed:
+#       sudo udevadm control --reload
+#       sudo rmmod apple_dfr_cfgsel appletbdrm && (re-insmod both)
+#
+# INSTALL: handled by install/install.sh (install -m0644 + udevadm control --reload).
+
+ACTION=="add|change", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", \
+  SUBSYSTEMS=="usb", ATTRS{idVendor}=="05ac", ATTRS{idProduct}=="8600", \
+  ENV{ID_SEAT}="seat-touchbar", TAG+="seat", TAG+="seat-touchbar", \
+  TAG-="master-of-seat", TAG-="uaccess", \
+  SYMLINK+="dri/touchbar", TAG+="systemd", \
+  ENV{SYSTEMD_WANTS}+="dfrd.service"
+
+# OPTIONAL (leave commented unless needed): if hid-generic turns the config-2
+# digitizer's non-standard reports into a garbage evdev input device that
+# libinput picks up (check `sudo libinput list-devices` while in config 2),
+# uncomment to hide it from the desktop. WARNING: this matches the iBridge in
+# BOTH configs — with the display stack UNLOADED (stock config 1) it would
+# also kill the stock Touch Bar's media-key input. Only enable once the
+# display stack is persistent.
+#ACTION=="add|change", SUBSYSTEM=="input", ATTRS{idVendor}=="05ac", \
+#  ATTRS{idProduct}=="8600", ENV{LIBINPUT_IGNORE_DEVICE}="1"

@@ -1,4 +1,7 @@
-# DRAFT — see ../PERSISTENCE-AND-ROADMAP.md before enabling.
+# SUPERSEDED by ../install/dfrd.service (a single unit running dfrd-run.sh,
+# which also starts dfr-fnd and tears all three down cleanly). install.sh
+# installs dfrd.service and removes this file if a prior run deployed it.
+# Kept here only for reference. DRAFT — see ../PERSISTENCE-AND-ROADMAP.md.
 # Requires: binaries installed to /usr/local/bin, modules DKMS-persistent,
 # 99-touchbar-dfr.rules installed (else this fails forever against mutter).
 [Unit]
