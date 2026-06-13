@@ -6,6 +6,8 @@ How a one-line no-op in an out-of-tree driver kept the Touch Bar **dark on every
 
 There are [slides](./presentation.md) too (Marp). And a **[sequel](#sequel--the-touch-bar-goes-dark-after-hibernate)**: lighting the bar at boot was round one — keeping it lit *across hibernate* was an ~8-reboot, all-night hunt with two more kernel bugs and [a story of its own](./THE-RELIGHT-HUNT.md).
 
+> **Phase 2 — the bar becomes *programmable*.** This page is about lighting the **firmware** function-key bar. But the T1 Touch Bar is really a 2170×60 pixel panel with a multitouch digitizer, and it can be driven directly: a kernel DRM driver ([`kernel/`](./kernel/)) plus a userspace stack ([`dfrd/`](./dfrd/)) turn it into a **macOS-style, layered, colour-icon, interactive bar** — `media` strip by default, F-keys on Fn, Ctrl/Opt/Cmd+Fn for system/F13–24/media layers — that **auto-starts on boot**. The reverse-engineering writeup is [`DFR-CUSTOM-RENDERING-FEASIBILITY.md`](./DFR-CUSTOM-RENDERING-FEASIBILITY.md); the stack and how to install it are in [`dfrd/README.md`](./dfrd/README.md).
+
 **Want your own agent to just do it?** Hand [`AGENT_SPEC.md`](./AGENT_SPEC.md) to a coding agent (Claude Code, etc.) and say *"follow AGENT_SPEC.md to make my Touch Bar work."* It's a self-contained spec + phased plan with GO/NO-GO gates, the exact patch, guardrails, and rollback.
 
 ---

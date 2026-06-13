@@ -2,7 +2,7 @@
 
 > **Question:** Can we get macOS-style custom Touch Bar content on the T1 (MacBookPro13,2) under Linux — arbitrary buttons/labels, and per-app layers (e.g. an Obsidian layout) — rather than just the firmware's three predefined layouts?
 >
-> **Short answer:** **PROVEN — done.** On 2026-06-12 we drove a custom BGR888 frame to the T1 Touch Bar from Linux and **the whole bar lit magenta.** The userspace spike (`dfr-switch.c`) enters USB "display mode" (config 2), speaks the `appletbdrm` protocol (GINF → REDY → frame), and renders arbitrary pixels. Per the prior-art survey this is a **first** for a T1 (`05ac:8600`) on Linux. A persistent kernel-module fix is built (`kernel/`) to turn this into a real DRM device for `tiny-dfr` + per-app layers.
+> **Short answer:** **PROVEN — done.** On 2026-06-12 we drove a custom BGR888 frame to the T1 Touch Bar from Linux and **the whole bar lit magenta.** The userspace spike (`dfr-switch.c`) enters USB "display mode" (config 2), speaks the `appletbdrm` protocol (GINF → REDY → frame), and renders arbitrary pixels. Per the prior-art survey this is a **first** for a T1 (`05ac:8600`) on Linux. **Outcome:** this scoping doc planned a `tiny-dfr` route — but `tiny-dfr` is T2/Apple-Silicon-only, so what shipped is a kernel DRM driver (`kernel/`) **plus a bespoke userspace stack (`dfrd/`)** that renders a layered, colour-Nerd-Font-icon, interactive bar and installs persistently. See [`dfrd/README.md`](./dfrd/README.md). The reverse-engineering below is preserved as the historical scoping record.
 >
 > *Status: core feasibility PROVEN end-to-end (pixels on screen). Productization (kernel module) in progress. Date: 2026-06-12.*
 >

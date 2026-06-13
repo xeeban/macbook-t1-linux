@@ -163,7 +163,7 @@ binaries to /usr/local/bin, systemd units + `SYMLINK+="dri/touchbar"` +
 
 ---
 
-# STEP 2 — Nerd Font rendering + ctrl/alt/meta layers (built 2026-06-12, NOT hardware-tested)
+# STEP 2 — Nerd Font rendering + ctrl/alt/meta layers (hardware-validated 2026-06-12)
 
 On top of the proven Step-1 stack, this revision adds:
 
