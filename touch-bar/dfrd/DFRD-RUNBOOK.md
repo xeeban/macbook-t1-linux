@@ -163,6 +163,125 @@ binaries to /usr/local/bin, systemd units + `SYMLINK+="dri/touchbar"` +
 
 ---
 
+# STEP 2 — Nerd Font rendering + ctrl/alt/meta layers (built 2026-06-12, NOT hardware-tested)
+
+On top of the proven Step-1 stack, this revision adds:
+
+- **FreeType text**: labels render anti-aliased from **JetBrainsMono Nerd Font**
+  (fontconfig lookup, `DFR_FONT=/path.ttf` env override). UTF-8 labels may mix
+  ASCII and Nerd Font icons; missing glyphs draw as U+FFFD.
+- **Layout model**: `struct dfr_key` gained `action` (`DFR_ACT_KEY` /
+  `DFR_ACT_CMD`), `cmd`, and `indicator` (`DFR_IND_BATTERY/WIFI/BT/KBDLIGHT`).
+  `fn` and `media` are unchanged.
+- **New layers** (dfr-fnd already routes these by name — nothing to wire):
+  - `alt`  (Opt+Fn): F13–F24 (`KEY_F13..KEY_F24`) — GNOME-assignable.
+  - `meta` (Cmd+Fn): media transport with icon glyphs
+    (prev/play-pause/next/stop/mute/vol-/vol+).
+  - `ctrl` (Ctrl+Fn): SYSTEM row — live kbd-backlight / battery / wifi / bt
+    indicators; **tap opens the matching gnome-control-center panel** in the
+    user's session.
+- **Dynamic refresh**: with `ctrl` active, dfr-render re-reads the values every
+  2.5 s (battery + kbd backlight + bt rfkill straight from /sys; wifi via
+  `timeout 1 nmcli -t`, throttled) and redraws only on change.
+- **Command launch as the user**: dfr-touchd (root) double-forks, drops to the
+  desktop user (env `DFR_USER`/`DFR_UID` override; else owner of
+  `/run/user/<uid>`; else uid 1000), sets `HOME`, `XDG_RUNTIME_DIR`,
+  `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus`,
+  `WAYLAND_DISPLAY=wayland-0`, `DISPLAY=:0`, and runs `/bin/sh -c "<cmd>"`.
+  One launch per tap (down-edge latch + 300 ms debounce).
+
+## Nerd Font glyph map (verified present in JetBrainsMonoNerdFont-Regular.ttf)
+
+| Use | Codepoint | Name |
+|---|---|---|
+| prev / play-pause / next | U+F04AE / U+F040E / U+F04AD | nf-md-skip_previous / play_pause / skip_next |
+| stop / mute / vol- / vol+ | U+F04DB / U+F075F / U+F075E / U+F075D | nf-md-stop / volume_mute / volume_minus / volume_plus |
+| battery charging / full / 10–90 / empty | U+F0084 / U+F0079 / U+F007A–F0082 / U+F008E | nf-md-battery_* |
+| wifi connected / on-disconnected / off | U+F05A9 / U+F092E / U+F05AA | nf-md-wifi / wifi_strength_outline / wifi_off |
+| bt on / off | U+F00AF / U+F00B2 | nf-md-bluetooth / bluetooth_off |
+| kbd backlight | U+F030C | nf-md-keyboard (F08DC "keyboard_brightness" renders as a file glyph in this font — avoided) |
+
+## 9. Build + offline self-check (no root)
+
+```sh
+cd ~/Code/xeeban/macbook-t1-linux/touch-bar/dfrd
+make                                     # render now links freetype2+fontconfig
+for l in fn media ctrl alt meta; do
+    ./dfr-render -l $l --preview /tmp/dfrd-$l.ppm
+    magick /tmp/dfrd-$l.ppm /tmp/dfrd-$l.png
+done
+# eyeball the PNGs: icons crisp? F13-F24 present? ctrl row shows live
+# battery/kbd values (preview reads /sys + nmcli unprivileged)?
+```
+
+## 10. New layers on hardware  🔬 TEST E
+
+```sh
+cd ~/Code/xeeban/macbook-t1-linux/touch-bar/dfrd
+sudo ./dfrd-run.sh                       # default media; dfr-fnd drives layers
+```
+
+- Hold **Opt+Fn** → F13–F24 row. Tap a few; check with `sudo libinput
+  debug-events | grep -E 'F1[3-9]|F2[0-4]'`, then bind one in GNOME Settings →
+  Keyboard → Custom Shortcuts.
+- Hold **Cmd+Fn** → icon media row; with music playing, tap play/pause + vol.
+- Hold **Ctrl+Fn** → SYSTEM row. Check each indicator against reality
+  (battery %, charge bolt when plugged, kbd backlight % after
+  `brightnessctl -d 'spi::kbd_backlight' set 50%`, wifi/bt toggles in
+  quick-settings flip the icons within ~2.5 s).
+
+## 11. Command launch into the GNOME session  🔬 TEST F  ← TOP RISK
+
+```sh
+# dry-run first: prints "CMD: gnome-control-center ..." without launching
+sudo ./dfr-touchd -n -l ctrl
+
+# then live (full stack running): Ctrl+Fn hold, tap the battery button
+# -> gnome-control-center should open ON the power panel, owned by your user
+ps -o user,cmd -C gnome-control-center      # expect nnishigaya, not root
+```
+
+If nothing opens:
+- `sudo -u nnishigaya env XDG_RUNTIME_DIR=/run/user/1000 \
+   DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
+   WAYLAND_DISPLAY=wayland-0 DISPLAY=:0 gnome-control-center wifi`
+  — if THIS fails too, the env recipe is wrong for this session: check
+  `ls /run/user/1000/` for the real `wayland-*` socket name and
+  `loginctl show-session $(loginctl | awk '/nnishigaya/{print $1; exit}')`.
+- if it works manually but not from the bar, suspect the double-fork env
+  (run `sudo ./dfr-touchd -v -l ctrl` and watch for the CMD line).
+- override the target user any time: `sudo DFR_USER=nnishigaya ./dfrd-run.sh`.
+
+## STEP-2 open hardware questions, ranked by risk
+
+1. **Launch-as-user into Wayland GNOME (TEST F).** The env quintet
+   (HOME/XDG_RUNTIME_DIR/DBUS bus/WAYLAND_DISPLAY/DISPLAY) is the standard
+   recipe but `WAYLAND_DISPLAY=wayland-0` is an assumption — GNOME on this
+   box may use another socket name, and gnome-control-center may also want
+   `XDG_CURRENT_DESKTOP=GNOME` (add to launch_cmd env if panels open weird).
+   Verified manually-runnable fallback above isolates env vs daemon issues.
+2. **Nerd glyph legibility at 60 px bar height on the physical panel.**
+   Previews look crisp at 30 px type, but the panel's subpixel layout +
+   the RGB888 conversion could soften thin strokes (wifi arcs, bt rune).
+   Knobs: `FONT_PX_MAX` in dfr-render.c, or point `DFR_FONT` at
+   `JetBrainsMonoNerdFont-Bold.ttf`.
+3. **Indicator correctness on battery/radio edges**: Discharging vs Charging
+   vs Full strings from BAT0, wifi radio-on-but-disconnected state parsing
+   (`nmcli -t -f TYPE,STATE device status`), rfkill index stability for bt.
+   Watch the ctrl row across a plug/unplug + airplane-mode cycle.
+4. **One-launch-per-tap debounce (TEST F).** Down-edge latch + 300 ms guard
+   should make taps singular, but a finger resting across the 150 ms release
+   window could re-trigger; if double-launches appear, raise
+   LAUNCH_DEBOUNCE_MS or debounce per-zone.
+5. **Redraw cost / flicker on indicator refresh.** Full-bar redraw +
+   DirtyFB every change (≤1 per 2.5 s) should be invisible, but if the
+   panel blanks/tears, switch to per-button dirty rects.
+6. **nmcli latency as root in the render loop.** `timeout 1` caps the stall
+   (worst case: bar redraw delayed, touch unaffected — touchd never shells
+   out for indicators). If it annoys, move wifi polling to rfkill sysfs.
+
+---
+
 ## Open hardware-test questions, ranked by risk
 
 1. **Does the seat rule actually free the card from mutter?** (TEST A/B)

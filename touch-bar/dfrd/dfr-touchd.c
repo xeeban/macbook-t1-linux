@@ -24,6 +24,13 @@
  *
  * Run as root (needs /dev/hidrawN + /dev/uinput).
  * SIGUSR1 cycles layout in lock-step with dfr-render (send to both).
+ *
+ * STEP 2: DFR_ACT_CMD keys run their command IN THE DESKTOP USER'S GNOME
+ * session instead of injecting a key: double-fork, drop to the user
+ * (env DFR_USER / DFR_UID override; else owner of /run/user/<uid>; else
+ * uid 1000), set HOME / XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS /
+ * WAYLAND_DISPLAY / DISPLAY, then `/bin/sh -c "<cmd>"`. One launch per
+ * tap (fires on the down edge only, plus a 300 ms global debounce).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +43,12 @@
 #include <poll.h>
 #include <dirent.h>
 #include <limits.h>
+#include <time.h>
+#include <pwd.h>
+#include <grp.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/ioctl.h>
 #include <linux/uinput.h>
 #include <linux/hidraw.h>
@@ -47,6 +60,7 @@
 #define DIGITIZER_IFACE 2     /* EP 0x83 lives on config-2 interface 2 */
 #define FALLBACK_IFACE  6     /* second config-2 HID interface (EP 0x87) */
 #define RELEASE_MS 150        /* no report for this long => finger up */
+#define LAUNCH_DEBOUNCE_MS 300 /* min gap between DFR_ACT_CMD launches */
 
 static volatile sig_atomic_t g_stop, g_cycle, g_setlayout = -1;
 static void on_stop(int s) { (void)s; g_stop = 1; }
@@ -161,6 +175,114 @@ static int find_digitizer(char *dev_out, size_t out_len, int verbose)
 }
 
 /* ------------------------------------------------------------------ */
+/* Launch DFR_ACT_CMD commands in the desktop user's GNOME session      */
+/* ------------------------------------------------------------------ */
+static uid_t g_uid;
+static gid_t g_gid;
+static char g_user[64] = "nnishigaya";   /* defaults; see resolve_user() */
+static char g_home[256] = "/home/nnishigaya";
+
+/* Pick the desktop user: DFR_UID > DFR_USER > owner of the first
+ * /run/user/<uid> with uid >= 1000 > uid 1000. */
+static void resolve_user(void)
+{
+	struct passwd *pw = NULL;
+	const char *e;
+
+	if ((e = getenv("DFR_UID")) && *e)
+		pw = getpwuid((uid_t)atoi(e));
+	if (!pw && (e = getenv("DFR_USER")) && *e)
+		pw = getpwnam(e);
+	if (!pw) {
+		DIR *d = opendir("/run/user");
+		if (d) {
+			struct dirent *de;
+			long best = -1;
+			while ((de = readdir(d))) {
+				char *end;
+				long v = strtol(de->d_name, &end, 10);
+				if (*end == 0 && v >= 1000 && (best < 0 || v < best))
+					best = v;
+			}
+			closedir(d);
+			if (best >= 0)
+				pw = getpwuid((uid_t)best);
+		}
+	}
+	if (!pw)
+		pw = getpwuid(1000);
+	if (pw) {
+		g_uid = pw->pw_uid;
+		g_gid = pw->pw_gid;
+		snprintf(g_user, sizeof g_user, "%s", pw->pw_name);
+		snprintf(g_home, sizeof g_home, "%s", pw->pw_dir);
+	} else {
+		g_uid = 1000;
+		g_gid = 1000;
+	}
+	printf("cmd launches run as %s (uid %d, %s)\n", g_user, (int)g_uid, g_home);
+}
+
+/* Double-fork so the command is reparented to init and we never collect
+ * it; the intermediate child exits immediately, so the waitpid() here is
+ * effectively instant and the 30/150 ms touch loop is never blocked. */
+static void launch_cmd(const char *cmd)
+{
+	pid_t c = fork();
+	if (c < 0) {
+		fprintf(stderr, "fork: %s\n", strerror(errno));
+		return;
+	}
+	if (c == 0) {
+		setsid();
+		pid_t g = fork();
+		if (g != 0)
+			_exit(g < 0 ? 127 : 0);
+
+		/* grandchild: drop privileges, build the session env, exec */
+		char runtime[64], bus[96];
+		snprintf(runtime, sizeof runtime, "/run/user/%d", (int)g_uid);
+		snprintf(bus, sizeof bus, "unix:path=/run/user/%d/bus", (int)g_uid);
+
+		if (initgroups(g_user, g_gid) < 0 ||
+		    setgid(g_gid) < 0 || setuid(g_uid) < 0)
+			_exit(126);   /* refuse to run the command as root */
+
+		clearenv();
+		setenv("HOME", g_home, 1);
+		setenv("USER", g_user, 1);
+		setenv("LOGNAME", g_user, 1);
+		setenv("PATH", "/usr/local/bin:/usr/bin:/bin", 1);
+		setenv("XDG_RUNTIME_DIR", runtime, 1);
+		setenv("DBUS_SESSION_BUS_ADDRESS", bus, 1);
+		setenv("WAYLAND_DISPLAY", "wayland-0", 1);
+		setenv("DISPLAY", ":0", 1);
+		if (chdir(g_home) < 0) { /* best-effort */ }
+
+		int devnull = open("/dev/null", O_RDWR);
+		if (devnull >= 0) {
+			dup2(devnull, 0);
+			dup2(devnull, 1);
+			dup2(devnull, 2);
+			if (devnull > 2)
+				close(devnull);
+		}
+		execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+		_exit(127);
+	}
+	/* parent: reap the short-lived intermediate child */
+	while (waitpid(c, NULL, 0) < 0 && errno == EINTR)
+		;
+}
+
+static int64_t now_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* ------------------------------------------------------------------ */
 /* uinput (ported from dfr-switch.c)                                   */
 /* ------------------------------------------------------------------ */
 static int g_ui = -1;
@@ -174,10 +296,13 @@ static int uinput_open(void)
 		return -1;
 	}
 	ioctl(g_ui, UI_SET_EVBIT, EV_KEY);
-	/* register every keycode of every layout so SIGUSR1 swaps need no re-create */
+	/* register every keycode of every layout so SIGUSR1 swaps need no re-create
+	 * (skip DFR_ACT_CMD buttons / keycode 0 — they launch commands instead) */
 	for (int l = 0; l < DFR_NLAYOUTS; l++)
 		for (int k = 0; k < dfr_layouts[l].nkeys; k++)
-			ioctl(g_ui, UI_SET_KEYBIT, dfr_layouts[l].keys[k].keycode);
+			if (dfr_layouts[l].keys[k].action == DFR_ACT_KEY &&
+			    dfr_layouts[l].keys[k].keycode > 0)
+				ioctl(g_ui, UI_SET_KEYBIT, dfr_layouts[l].keys[k].keycode);
 
 	struct uinput_setup us;
 	memset(&us, 0, sizeof us);
@@ -231,9 +356,11 @@ int main(int argc, char **argv)
 			dry_run = 1;   /* parse + print, no uinput injection */
 		} else {
 			fprintf(stderr,
-				"usage: %s [-l fn|media] [-d /dev/hidrawN] [-v] [-n]\n"
+				"usage: %s [-l fn|media|ctrl|alt|meta] [-d /dev/hidrawN] [-v] [-n]\n"
 				"  -v  verbose (dump raw reports + candidates)\n"
-				"  -n  dry run: print taps, do not inject keys\n"
+				"  -n  dry run: print taps, do not inject keys / launch commands\n"
+				"  DFR_USER / DFR_UID : desktop user for command buttons\n"
+				"                       (default: owner of /run/user/<uid>)\n"
 				"  SIGUSR1 cycles layout (send to dfr-render too!)\n",
 				argv[0]);
 			return 2;
@@ -266,6 +393,7 @@ int main(int argc, char **argv)
 
 	if (!dry_run && uinput_open() < 0)
 		return 1;
+	resolve_user();   /* for DFR_ACT_CMD buttons */
 
 	const struct dfr_layout *layout = &dfr_layouts[layout_idx];
 	printf("layout '%s':", layout->name);
@@ -274,9 +402,10 @@ int main(int argc, char **argv)
 	printf("\nlistening%s — Ctrl-C to stop.\n", dry_run ? " (dry run)" : "");
 	fflush(stdout);
 
-	int down = 0, down_key = 0;
+	int down = 0, down_key = 0;     /* down_key == 0: contact w/o key (cmd button) */
 	int float_off = -1;        /* auto-detected: 0, or 1 if reports are ID-prefixed */
 	int logged_size = 0;
+	int64_t last_launch = 0;
 	uint8_t buf[256];
 
 	while (!g_stop) {
@@ -289,7 +418,7 @@ int main(int argc, char **argv)
 			g_setlayout = -1;
 			if (idx < DFR_NLAYOUTS && idx != layout_idx) {
 				if (down) {           /* don't leave a key stuck across swap */
-					if (!dry_run) key_up(down_key);
+					if (!dry_run && down_key) key_up(down_key);
 					down = 0;
 				}
 				layout_idx = idx;
@@ -309,7 +438,7 @@ int main(int argc, char **argv)
 		}
 		if (pr == 0) {                       /* silence => finger lifted */
 			if (down) {
-				if (!dry_run) key_up(down_key);
+				if (!dry_run && down_key) key_up(down_key);
 				if (verbose) { printf("UP\n"); fflush(stdout); }
 				down = 0;
 			}
@@ -356,7 +485,7 @@ int main(int argc, char **argv)
 					       "release frame or wrong node?)\n");
 				/* treat as release */
 				if (down) {
-					if (!dry_run) key_up(down_key);
+					if (!dry_run && down_key) key_up(down_key);
 					down = 0;
 				}
 				continue;
@@ -370,7 +499,7 @@ int main(int argc, char **argv)
 
 		if (x < 0.45f || x > 1.05f) {        /* explicit release / junk */
 			if (down) {
-				if (!dry_run) key_up(down_key);
+				if (!dry_run && down_key) key_up(down_key);
 				down = 0;
 			}
 			continue;
@@ -382,19 +511,38 @@ int main(int argc, char **argv)
 		int z = dfr_zone_from_nx(layout, nx);
 
 		if (!down) {
+			const struct dfr_key *k = &layout->keys[z];
 			down = 1;
-			down_key = layout->keys[z].keycode;
-			if (!dry_run)
-				key_down(down_key);
-			printf("DOWN x=%.3f nx=%.3f -> zone %d [%s]%s\n",
-			       (double)x, (double)nx, z, layout->keys[z].label,
-			       dry_run ? " (dry)" : "");
+			down_key = 0;
+			if (k->action == DFR_ACT_CMD && k->cmd) {
+				/* fire on the down edge; the `down` latch gives
+				 * one launch per contact, the time check guards
+				 * against bounce/double-report */
+				int64_t t = now_ms();
+				if (t - last_launch >= LAUNCH_DEBOUNCE_MS) {
+					last_launch = t;
+					if (!dry_run)
+						launch_cmd(k->cmd);
+					printf("DOWN x=%.3f nx=%.3f -> zone %d [%s] CMD: %s%s\n",
+					       (double)x, (double)nx, z, k->label,
+					       k->cmd, dry_run ? " (dry)" : "");
+				} else {
+					printf("DOWN zone %d [%s] CMD debounced\n", z, k->label);
+				}
+			} else {
+				down_key = k->keycode;
+				if (!dry_run && down_key)
+					key_down(down_key);
+				printf("DOWN x=%.3f nx=%.3f -> zone %d [%s]%s\n",
+				       (double)x, (double)nx, z, k->label,
+				       dry_run ? " (dry)" : "");
+			}
 			fflush(stdout);
 		}
 		/* while held we keep the original key even if the finger slides */
 	}
 
-	if (down && !dry_run)
+	if (down && !dry_run && down_key)
 		key_up(down_key);
 	if (g_ui >= 0) {
 		ioctl(g_ui, UI_DEV_DESTROY);
