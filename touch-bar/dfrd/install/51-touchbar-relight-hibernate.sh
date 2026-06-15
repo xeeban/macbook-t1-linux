@@ -7,15 +7,17 @@
 # TWO REGIMES, decided at resume time by reading bConfigurationValue of 1-3:
 #
 #   config 2  (custom display stack active):
-#       Do NOTHING here. The relight is handled by the kernel + systemd:
-#       on resume the iBridge re-enumerates, apple_dfr_cfgsel re-selects
-#       config 2, appletbdrm re-probes -> the DRM card is re-added -> the
-#       udev rule's ENV{SYSTEMD_WANTS}=dfrd.service restarts the renderer,
-#       which repaints the bar. Reloading apple_ibridge here is pointless
-#       (patched, it just declines in config 2) and risks racing that
-#       re-probe, so we skip it.
-#       (Belt-and-suspenders: also kick dfrd.service in case the card did
-#       NOT re-enumerate — a no-op restart if it's already up.)
+#       Post-hibernate the panel comes back DARK: pixels repaint fine but the
+#       backlight is off, because panel POWER is a config-1 apple_touchbar
+#       firmware function with NO config-2 equivalent (proven 2026-06-15 — the
+#       config-2 bulk protocol and every iface-6 vendor HID report are inert for
+#       panel power). So a dfrd restart alone leaves it dark. Instead schedule
+#       the "config-1 bounce" (detached, time-bounded): briefly switch to config
+#       1, load apple_ibridge+apple_touchbar to power the panel, switch back to
+#       config 2. That relight SURVIVES the switch back -> bar returns DIM but
+#       fully functional, no reboot. (Brightness is ALS/bridgeOS-internal and
+#       reboot-only; we accept dim. S3 suspend is NOT recoverable, hence the
+#       hibernate-only guard below.)
 #
 #   config 1  (stock firmware bar — i.e. the custom stack is uninstalled or
 #             disabled): fall back to the ORIGINAL full apple_ibridge-stack
@@ -33,11 +35,19 @@ esac
 cfg="$(cat /sys/bus/usb/devices/1-3/bConfigurationValue 2>/dev/null || echo '?')"
 
 if [ "$cfg" = "2" ]; then
-    echo "touchbar-relight: config 2 (display stack) — kernel re-probe + dfrd handle relight; nudging dfrd.service"
-    # Restart is a cheap no-op if the card re-add already pulled dfrd back up;
-    # if the card did NOT re-enumerate, this repaints onto the surviving card.
-    systemctl restart dfrd.service >/dev/null 2>&1 \
-        || echo "touchbar-relight: warn: could not restart dfrd.service (may not be installed)"
+    # Schedule the config-1 bounce +5s detached (let the resume settle first:
+    # card re-enumerate, dfrd come up), time-bounded so it can never wedge resume.
+    # The bounce stops/starts dfrd itself. Relights the bar DIM (see header).
+    echo "touchbar-relight: config 2 (display stack) — scheduling +5s detached config-1 bounce relight"
+    if systemd-run --on-active=5s --collect --unit=touchbar-config1-bounce \
+            -p RuntimeMaxSec=120 -p TimeoutStopSec=20 \
+            --description='post-hibernate Touch Bar relight (config-1 bounce)' \
+            /usr/local/sbin/touchbar-config1-bounce; then
+        echo "touchbar-relight: bounce scheduled OK (touchbar-config1-bounce -> +5s)"
+    else
+        echo "touchbar-relight: warn: systemd-run scheduling failed; falling back to dfrd restart"
+        systemctl restart dfrd.service >/dev/null 2>&1 || true
+    fi
     exit 0
 fi
 

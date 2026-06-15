@@ -183,6 +183,14 @@ systemctl daemon-reload
 # ----------------------------------------------------------------------------
 step "6/6  Install config-aware hibernate relight hook"
 
+# config-2 relight helper: the config-1 bounce, invoked by the hook below.
+if [ -e "$TB_DIR/touchbar-config1-bounce.sh" ]; then
+    install -m0755 "$TB_DIR/touchbar-config1-bounce.sh" /usr/local/sbin/touchbar-config1-bounce
+    echo "    -> /usr/local/sbin/touchbar-config1-bounce (config-2 post-hibernate relight)"
+else
+    echo "    WARNING: $TB_DIR/touchbar-config1-bounce.sh missing — config-2 relight will fall back to dfrd restart" >&2
+fi
+
 SLEEP_DIR="/usr/lib/systemd/system-sleep"
 HOOK="51-touchbar-relight-hibernate.sh"
 if [ -d "$SLEEP_DIR" ]; then

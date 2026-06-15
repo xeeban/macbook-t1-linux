@@ -372,3 +372,48 @@ escape hatch.
 - [Hackaday — Touch Bar OLED panel RE (MIPI DSI command mode)](https://hackaday.com/2024/01/23/reverse-engineering-the-apple-touch-bar-screen/)
 - Local evidence: `journalctl -b 0` 2026-06-12 07:04–07:35 (clean teardowns, dark-after-S4 with
   working transport); driver source `/usr/src/apple-ib-drv-r307.4afd309/` (suspend-path asymmetry §4).
+
+---
+
+## 2026-06-14 UPDATE — root cause found from the config-2 side (panel power is config-1-only)
+
+This whole doc was written against the **stock config-1** stack. The machine now runs the **custom
+config-2** Touch Bar (apple_dfr_cfgsel forces config 2 + appletbdrm DRM driver + dfrd userspace,
+with apple_ibridge/apple_touchbar hard-blocked). Re-testing post-sleep from that side resolves the
+mechanism.
+
+**New kernel work (appletbdrm.c):** added USB `.suspend`/`.resume`/`.reset_resume`. Resume runs
+`appletbdrm_rearm_display` (clear_halt both pipes → GINF → REDY → CLEAR_DISPLAY×2) then
+`drm_mode_config_helper_resume` (full-damage framebuffer recommit). Also fixed a latent bug:
+`appletbdrm_primary_plane_reset` did `WARN_ON(plane->state)` + leaked, but `drm_atomic_helper_resume`
+calls `drm_mode_config_reset` which re-invokes `.reset` with live state — made it re-entrant. Worth
+upstreaming independent of the relight question.
+
+**Decisive experiment table (2026-06-14, all post-sleep):**
+
+| Tried (post S3 *and* S4) | Commands all succeed? | Panel |
+|---|---|---|
+| config-2 macOS wake replay: GINF+REDY+CLEAR_DISPLAY×2 + SET_REPORT(Feature id3, `03 01 F4 01`, ret=15) + full framebuffer push (recommit rc=0, **zero -110**) | yes | **dark** |
+| config-2 forced re-enumeration (`authorized` 0→1, SET_CONFIGURATION(2), fresh appletbdrm probe) | yes | **dark** |
+| config-1 fresh `apple_ibridge`+`apple_touchbar` probe (`modprobe --ignore-install`, both bound) | yes | **LIT, then dims off** |
+
+**Two facts settle it:**
+1. `DRLC` (macOS S3 trace) **==** appletbdrm's `CLEAR_DISPLAY` byte-for-byte
+   (`cpu_to_le32(0x434c5244)` → wire `44 52 4C 43`). So §5.2's "replay DRLC over config 2" was
+   effectively executed (it's our normal CLRD) — and it does **not** relight. The DRLC replay was a
+   red herring; it's not the missing piece.
+2. The config-1 probe **does** relight the panel (then `apple_touchbar`'s idle timer dims it). So the
+   panel is **not** a hard reboot-only firmware latch — it is runtime-relightable.
+
+**Conclusion — the actual root cause:** the Touch Bar **panel backlight/power is a config-1
+`apple_touchbar` HID `disp` function. The config-2 bulk protocol has no panel-power command.** At
+cold boot the T1 self-powers the panel (config-2 works); after any host sleep the power drops and
+config-2 cannot restore it, so every config-2 command ACKs onto a dark panel. The custom mode
+regressed sleep relight precisely by amputating the config-1 disp path.
+
+**Next (pending):** `tb-hybrid-test.sh` — does a config-1 disp-power relight **survive** the switch
+back to config-2? If yes → build a resume path that bounces config-1 disp-ON then returns to
+config-2 (custom bar survives suspend+hibernate). If no → custom bar stays dark-after-sleep
+(reboot relights), or fall back to the stock bar post-sleep. Note plain **S3 suspend** also leaves
+the custom bar dark (not just S4) — so on this machine the trade is custom-bar-vs-sleep-relight, not
+hibernate-specific. See memory `t1-touchbar-config2-sleep-dark`.

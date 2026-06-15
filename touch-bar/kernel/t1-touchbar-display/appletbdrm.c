@@ -30,6 +30,7 @@
 #include <drm/drm_gem_atomic_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_gem_shmem_helper.h>
+#include <drm/drm_modeset_helper.h>
 #include <drm/drm_plane.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
@@ -492,11 +493,24 @@ static void appletbdrm_primary_plane_helper_atomic_disable(struct drm_plane *pla
 	drm_dev_exit(idx);
 }
 
+static void appletbdrm_primary_plane_destroy_state(struct drm_plane *plane,
+						   struct drm_plane_state *state);
+
 static void appletbdrm_primary_plane_reset(struct drm_plane *plane)
 {
 	struct appletbdrm_plane_state *appletbdrm_state;
 
-	WARN_ON(plane->state);
+	/*
+	 * .reset must be re-entrant: drm_atomic_helper_resume() (driven from our
+	 * USB .resume/.reset_resume) calls drm_mode_config_reset(), which
+	 * re-invokes this hook while a plane state already exists. Tear the old
+	 * state down first instead of WARNing and leaking it (the original
+	 * upstream code assumed reset only ran once, at probe).
+	 */
+	if (plane->state) {
+		appletbdrm_primary_plane_destroy_state(plane, plane->state);
+		plane->state = NULL;
+	}
 
 	appletbdrm_state = kzalloc_obj(*appletbdrm_state);
 	if (!appletbdrm_state)
@@ -816,6 +830,135 @@ static void appletbdrm_shutdown(struct usb_interface *intf)
 	drm_atomic_helper_shutdown(&adev->drm);
 }
 
+/*
+ * Re-arm the T1 display pipeline after a system sleep.
+ *
+ * Across S3 -- and across the freeze/thaw/restore legs of S4 hibernate -- the
+ * iBridge parks its display engine. The USB device re-enumerates cleanly and
+ * the command channel keeps working (GINF and control transfers succeed), but
+ * framebuffer pushes on the bulk OUT pipe are silently dropped and time out
+ * (-ETIMEDOUT): the panel stays dark until a full host reboot. A plain USB
+ * re-enumeration does NOT clear this -- the latch lives in the bridge's display
+ * pipeline, not its USB stack.
+ *
+ * macOS's relight surface lives entirely in the config-2 bulk protocol -- it
+ * never touches the config-1 HID path. Its sequence is asymmetric:
+ *
+ *   sleep: DRLC, DRLC, SET_REPORT(Feature id 3), DRLC   <- gracefully parks panel
+ *   wake:  DRLC, DRLC, <full framebuffer push>          <- no feature report
+ *
+ * "DRLC" on the wire (44 52 4C 43) is byte-identical to our
+ * APPLETBDRM_MSG_CLEAR_DISPLAY. We own the config-2 bulk pipes, so we mirror
+ * both halves: appletbdrm_park_display() runs the sleep sequence from .suspend,
+ * and this wake path resyncs the session (clear pipe halt, GINF, REDY), issues
+ * CLEAR_DISPLAY twice, and lets the DRM resume helper drive the full-damage
+ * framebuffer re-upload.
+ *
+ * The crucial asymmetry, learned the hard way: the SET_REPORT(id 3) belongs on
+ * the SLEEP path (it parks the panel into the state macOS expects to wake from)
+ * -- sending it on wake is semantically backwards and does not relight.
+ */
+static int appletbdrm_rearm_display(struct appletbdrm_device *adev)
+{
+	struct usb_device *udev = adev_to_udev(adev);
+	int ret;
+
+	usb_clear_halt(udev, usb_sndbulkpipe(udev, adev->out_ep));
+	usb_clear_halt(udev, usb_rcvbulkpipe(udev, adev->in_ep));
+
+	ret = appletbdrm_get_information(adev);
+	if (ret)
+		return ret;
+
+	ret = appletbdrm_signal_readiness(adev);
+	if (ret)
+		return ret;
+
+	/* macOS sends the display command twice on wake; mirror that. */
+	ret = appletbdrm_clear_display(adev);
+	if (ret)
+		return ret;
+
+	return appletbdrm_clear_display(adev);
+}
+
+/*
+ * Park the panel the way macOS does right before the device sleeps, so it comes
+ * back in the firmware-blessed state on wake (investigation §5.1): two display
+ * commands, the display-state Feature report, then a final display command.
+ *
+ *   SET_REPORT  bmRequestType = 0x21 (OUT | CLASS | INTERFACE)
+ *               bRequest      = 0x09 (HID_REQ_SET_REPORT)
+ *               wValue        = 0x0303 (Feature report (3) << 8 | id 3)
+ *               wIndex        = 6  (the iBridge HID interface)
+ *               wLength       = 15  data: 03 01 F4 01 00 ...
+ *
+ * The report targets HID interface 6, which appletbdrm does not own -- but EP0
+ * control transfers are device-wide, so issuing it is legal regardless.
+ */
+static void appletbdrm_park_display(struct appletbdrm_device *adev)
+{
+	struct usb_device *udev = adev_to_udev(adev);
+	static const u8 disp_feature[15] = { 0x03, 0x01, 0xf4, 0x01 };
+	u8 *buf;
+	int fret = -ENOMEM;
+
+	appletbdrm_clear_display(adev);
+	appletbdrm_clear_display(adev);
+
+	buf = kmemdup(disp_feature, sizeof(disp_feature), GFP_KERNEL);
+	if (buf) {
+		fret = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
+				       0x09,	/* HID_REQ_SET_REPORT */
+				       0x21,	/* OUT | CLASS | INTERFACE */
+				       0x0303,	/* Feature report, id 3 */
+				       6,	/* wIndex: iBridge HID interface */
+				       buf, sizeof(disp_feature),
+				       USB_CTRL_SET_TIMEOUT);
+		kfree(buf);
+	}
+	drm_info(&adev->drm, "pre-sleep display SET_REPORT(id 3) returned %d\n", fret);
+
+	appletbdrm_clear_display(adev);
+}
+
+static int appletbdrm_suspend(struct usb_interface *intf, pm_message_t message)
+{
+	struct appletbdrm_device *adev = usb_get_intfdata(intf);
+
+	int ret;
+
+	/*
+	 * Save the modeset state and disable the plane -- our .atomic_disable
+	 * issues CLEAR_DISPLAY. The bulk endpoints are still live at this point,
+	 * so follow it with the macOS sleep sequence to park the panel into the
+	 * firmware-blessed pre-sleep state (investigation §5.1).
+	 */
+	ret = drm_mode_config_helper_suspend(&adev->drm);
+	appletbdrm_park_display(adev);
+
+	return ret;
+}
+
+static int appletbdrm_resume(struct usb_interface *intf)
+{
+	struct appletbdrm_device *adev = usb_get_intfdata(intf);
+	struct drm_device *drm = &adev->drm;
+	int ret;
+
+	ret = appletbdrm_rearm_display(adev);
+	if (ret)
+		drm_err(drm, "Failed to re-arm display on resume (%d)\n", ret);
+	else
+		drm_info(drm, "re-armed display on resume (GINF+REDY+CLRD ok), recommitting framebuffer\n");
+
+	/* Re-commit the saved mode -> full framebuffer re-upload. */
+	ret = drm_mode_config_helper_resume(drm);
+	drm_info(drm, "resume framebuffer recommit returned %d\n", ret);
+
+	return ret;
+}
+
 static const struct usb_device_id appletbdrm_usb_id_table[] = {
 	{ USB_DEVICE_INTERFACE_CLASS(0x05ac, 0x8302, USB_CLASS_AUDIO_VIDEO) },
 	/* Apple T1 iBridge (MacBookPro13,x / 14,x): the AV interface only
@@ -831,6 +974,14 @@ static struct usb_driver appletbdrm_usb_driver = {
 	.probe		= appletbdrm_probe,
 	.disconnect	= appletbdrm_disconnect,
 	.shutdown	= appletbdrm_shutdown,
+	/*
+	 * .resume runs on S3 wake; .reset_resume runs when the device was reset
+	 * during resume (the usual S4/hibernate case). Both re-arm the parked
+	 * display pipeline -- see appletbdrm_rearm_display().
+	 */
+	.suspend	= appletbdrm_suspend,
+	.resume		= appletbdrm_resume,
+	.reset_resume	= appletbdrm_resume,
 	.id_table	= appletbdrm_usb_id_table,
 };
 module_usb_driver(appletbdrm_usb_driver);
