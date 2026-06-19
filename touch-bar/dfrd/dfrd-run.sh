@@ -54,15 +54,39 @@ fi
 
 # --- launch --------------------------------------------------------------
 RPID="" TPID="" FPID=""
+reaped=0
+# Tear down the trio. Idempotent (the signal path and the EXIT trap can both
+# reach it). BOUNDED: SIGTERM each daemon, give them a short grace, then SIGKILL
+# any straggler so `systemctl stop`/`restart` can never hang on us. (It used to
+# wedge in `deactivating (stop-sigterm)` until systemd's 90s SIGKILL — root cause
+# was the old trap returning into `wait -n` and busy-spinning; see below.)
 cleanup() {
+    [ "$reaped" -eq 1 ] && return
+    reaped=1
     trap - EXIT INT TERM
     [ -n "$FPID" ] && kill "$FPID" 2>/dev/null
     [ -n "$TPID" ] && kill "$TPID" 2>/dev/null
     [ -n "$RPID" ] && kill "$RPID" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do          # up to ~1s grace for clean exit
+        kill -0 "$RPID" 2>/dev/null || kill -0 "$TPID" 2>/dev/null \
+            || kill -0 "$FPID" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill -9 "$FPID" "$TPID" "$RPID" 2>/dev/null   # SIGKILL whatever's left
     wait 2>/dev/null
     echo "dfrd: stopped."
 }
-trap cleanup EXIT INT TERM
+# SIGINT/SIGTERM: tear down and exit() FROM THE HANDLER. Do not just return —
+# bash would resume the interrupted `wait -n` below and (5.3) busy-spin retrying
+# it, which is exactly what wedged the stop. Exiting here makes the trap
+# fire-and-finish so systemd sees us gone immediately.
+on_signal() {
+    echo "dfrd: signal — tearing down." >&2
+    cleanup
+    exit 0
+}
+trap on_signal INT TERM
+trap cleanup EXIT
 
 echo "dfrd: starting renderer ($card, layout '$LAYOUT')..."
 "$DIR/dfr-render" -l "$LAYOUT" "$@" &
@@ -96,5 +120,8 @@ fi
 
 echo "dfrd: up. render=$RPID touchd=$TPID fnd=${FPID:-none}. Ctrl-C to stop."
 echo "dfrd: default 'media' strip; HOLD Fn for F-keys (Ctrl/Alt/Cmd+Fn = extra layers once defined)."
+# Block until a daemon exits on its own (crash). A trapped INT/TERM instead
+# runs on_signal, which exits directly — so we never fall through and spin here.
+# The EXIT trap (cleanup) reaps the rest on the way out.
 wait -n
 echo "dfrd: a daemon exited — tearing down." >&2
