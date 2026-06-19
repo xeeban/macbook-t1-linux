@@ -101,6 +101,7 @@ SLEEP_DIR="/usr/lib/systemd/system-sleep"
 HOOK="51-touchbar-relight-hibernate.sh"
 if [ -e "$SLEEP_DIR/$HOOK.pre-dfrd" ]; then
     mv -f "$SLEEP_DIR/$HOOK.pre-dfrd" "$SLEEP_DIR/$HOOK"
+    chmod 0755 "$SLEEP_DIR/$HOOK"   # re-arm: install stripped +x on the backup
     echo "    restored original $SLEEP_DIR/$HOOK from .pre-dfrd backup"
 else
     echo "    no .pre-dfrd backup found — leaving $SLEEP_DIR/$HOOK as-is"

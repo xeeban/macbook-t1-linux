@@ -195,9 +195,15 @@ SLEEP_DIR="/usr/lib/systemd/system-sleep"
 HOOK="51-touchbar-relight-hibernate.sh"
 if [ -d "$SLEEP_DIR" ]; then
     # Back up the existing (stock-bar-only) hook once, so uninstall can restore it.
+    # CRITICAL: strip the execute bit on the backup. systemd-sleep runs EVERY
+    # executable file in this directory regardless of name/suffix — an executable
+    # .pre-dfrd copy would fire on every hibernate ALONGSIDE the live hook,
+    # double-scheduling the relight. The non-executable backup is inert here and
+    # uninstall re-adds +x when it restores it.
     if [ -e "$SLEEP_DIR/$HOOK" ] && [ ! -e "$SLEEP_DIR/$HOOK.pre-dfrd" ]; then
         cp -p "$SLEEP_DIR/$HOOK" "$SLEEP_DIR/$HOOK.pre-dfrd"
-        echo "    backed up existing hook -> $SLEEP_DIR/$HOOK.pre-dfrd"
+        chmod a-x "$SLEEP_DIR/$HOOK.pre-dfrd"
+        echo "    backed up existing hook -> $SLEEP_DIR/$HOOK.pre-dfrd (inert: non-executable)"
     fi
     install -m0755 "$INSTALL_DIR/$HOOK" "$SLEEP_DIR/$HOOK"
     echo "    -> $SLEEP_DIR/$HOOK (config-aware: skips apple_ibridge reload in config 2)"
