@@ -64,6 +64,8 @@
 #define COL_BTN 0xFF2E2E2Eu
 #define COL_TXT 0xFFE8E8E8u
 #define COL_ESC 0xFF3A2E2Eu   /* slightly warm tint so ESC is findable by feel */
+#define COL_BORDER 0xFF606060u /* grey outline so buttons stand out on the dark bar */
+#define BORDER_PX 2            /* outline thickness (px) */
 
 /* type sizes for the 60px bar (buttons are bar-12 = 48px tall) */
 #define FONT_PX_MAX 30
@@ -124,6 +126,19 @@ static void fill_phys(int px, int py, int w, int h, uint32_t c)
 	for (int y = py; y < py + h; y++)
 		for (int x = px; x < px + w; x++)
 			put_phys(x, y, c);
+}
+
+/* draw a `t`px-thick outline just inside the (px,py,w,h) rect */
+static void stroke_phys(int px, int py, int w, int h, int t, uint32_t c)
+{
+	if (t <= 0 || w <= 0 || h <= 0)
+		return;
+	if (t > w / 2) t = w / 2;
+	if (t > h / 2) t = h / 2;
+	fill_phys(px, py, w, t, c);                 /* top    */
+	fill_phys(px, py + h - t, w, t, c);         /* bottom */
+	fill_phys(px, py, t, h, c);                 /* left   */
+	fill_phys(px + w - t, py, t, h, c);         /* right  */
 }
 
 /* ------------------------------------------------------------------ */
@@ -484,6 +499,7 @@ static void draw_layout(const struct dfr_layout *l)
 		uint32_t bc = (l->keys[i].action == DFR_ACT_KEY &&
 			       l->keys[i].keycode == KEY_ESC) ? COL_ESC : COL_BTN;
 		fill_phys(x0 + 3, 6, bw, g_short - 12, bc);
+		stroke_phys(x0 + 3, 6, bw, g_short - 12, BORDER_PX, COL_BORDER);
 
 		const struct dfr_key *k = &l->keys[i];
 		const char *label = key_label(k);
